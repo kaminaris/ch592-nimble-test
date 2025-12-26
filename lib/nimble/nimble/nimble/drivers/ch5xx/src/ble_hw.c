@@ -59,9 +59,10 @@ uint8_t g_ch592_num_irks;
  * @return 0 on success, -1 if no public address available
  */
 #define ROM_CFG_MAC_ADDR	0x7F018
+
 int ble_hw_get_public_addr(ble_addr_t* addr) {
 	uint32_t addressHigh = *(vu32*)(ROM_CFG_MAC_ADDR + 4);
-	uint32_t addressLow = *(vu32*)ROM_CFG_MAC_ADDR;
+	uint32_t addressLow  = *(vu32*)ROM_CFG_MAC_ADDR;
 
 	memcpy(addr->val, &addressLow, 4);
 	memcpy(&addr->val[4], &addressHigh, 2);
@@ -178,22 +179,48 @@ int ble_hw_encrypt_block(struct ble_encryption_block* ecb) {
 	return -1;
 }
 
+#define BLE_LL_RNG_BUFSIZE (MYNEWT_VAL(BLE_LL_RNG_BUFSIZE))
+static uint8_t rng_buf[BLE_LL_RNG_BUFSIZE];
+static volatile uint8_t rng_head = 0;
+static volatile uint8_t rng_tail = 0;
+static uint32_t holdrand         = 0x12345678;
+
+static inline uint32_t rng_clock(void) {
+	/* SysTick counter is sufficient for jitter */
+	return SysTick->CNT;
+}
+
+static inline uint32_t rng_step(void) {
+	holdrand += rng_clock();
+	holdrand = holdrand * 0x343fd + 0x269ec3;
+	return holdrand;
+}
+
+static void rng_fill_buffer(void) {
+	/* Fill until buffer is full */
+	while (((rng_head + 1) % BLE_LL_RNG_BUFSIZE) != rng_tail) {
+		uint8_t r         = (uint8_t)(rng_step() & 0xFF);
+		rng_buf[rng_head] = r;
+		rng_head          = (rng_head + 1) % BLE_LL_RNG_BUFSIZE;
+
+		/* Call callback for each byte */
+		if (g_ble_rng_isr_cb) {
+			g_ble_rng_isr_cb(r);
+		}
+	}
+}
+
 /**
  * Random number generator interrupt handler.
  * Called when RNG has a new random value ready.
  */
-static void ble_rng_isr(void) {
-	uint8_t rnum;
-
-	// os_trace_isr_enter();
-
-	// TODO: as far as i can tell CH5xx doesnt have an RNG peripheral, would probably need to implement a software RNG
+void ble_rng_isr(void) {
 	if (g_ble_rng_isr_cb == NULL) {
-		// os_trace_isr_exit();
+		/* No callback, "disable" software ISR (no-op) */
 		return;
 	}
 
-	// os_trace_isr_exit();
+	rng_fill_buffer();
 }
 
 /**
@@ -204,8 +231,16 @@ static void ble_rng_isr(void) {
  * @return 0 on success
  */
 int ble_hw_rng_init(ble_rng_isr_cb_t cb, int bias) {
-	// TODO: as far as i can tell CH5xx doesnt have an RNG peripheral, would probably need to implement a software RNG
 	g_ble_rng_isr_cb = cb;
+#ifdef CH5xx
+	/* Weak initial seed */
+	holdrand ^= (uint32_t)(uintptr_t)&holdrand;
+	holdrand ^= rng_clock();
+
+	/* Initialize buffer indices */
+	rng_head = 0;
+	rng_tail = 0;
+#endif
 	return 0;
 }
 
@@ -216,7 +251,7 @@ int ble_hw_rng_init(ble_rng_isr_cb_t cb, int bias) {
  * @return 0 on success
  */
 int ble_hw_rng_start(void) {
-	// TODO: as far as i can tell CH5xx doesnt have an RNG peripheral, would probably need to implement a software RNG
+	rng_fill_buffer();
 	return 0;
 }
 
@@ -237,8 +272,23 @@ int ble_hw_rng_stop(void) {
  * @return Random byte value
  */
 uint8_t ble_hw_rng_read(void) {
-	// TODO: as far as i can tell CH5xx doesnt have an RNG peripheral, would probably need to implement a software RNG
-	return 0;
+	uint8_t r = 0;
+
+	if (rng_tail != rng_head) {
+		/* Read from buffer */
+		r = rng_buf[rng_tail];
+		rng_tail = (rng_tail + 1) % BLE_LL_RNG_BUFSIZE;
+	} else {
+		/* Buffer empty: generate a byte on demand */
+		r = (uint8_t)(rng_step() & 0xFF);
+
+		/* Optional: call callback if defined */
+		if (g_ble_rng_isr_cb) {
+			g_ble_rng_isr_cb(r);
+		}
+	}
+
+	return r;
 }
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)

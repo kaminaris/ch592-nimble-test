@@ -162,6 +162,7 @@ void ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs) {
 }
 
 #define NRF_MAX_ENCRYPTED_PYLD_LEN  (27)
+
 uint8_t ble_phy_max_data_pdu_pyld(void) {
 	// TODO: not implemented yet
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
@@ -169,6 +170,14 @@ uint8_t ble_phy_max_data_pdu_pyld(void) {
 #else
 	return BLE_LL_DATA_PDU_MAX_PYLD;
 #endif
+}
+
+void ble_phy_rfclk_disable(void) {
+	// TODO: not implemented yet
+}
+
+void ble_phy_rfclk_enable(void) {
+	// TODO: not implemented yet
 }
 
 void ble_phy_resolv_list_enable(void) {

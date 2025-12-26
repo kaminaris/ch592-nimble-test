@@ -22,7 +22,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <string.h>
-
+#include <utils/debug_utils.h>
 #include "nimble/nimble/include/nimble/nimble_npl.h"
 
 // CH592 specific includes
@@ -33,10 +33,7 @@ static void* rng_isr_addr;
 static void* rtc_isr_addr; // CH592 uses RTC for BLE timing
 
 static inline bool in_isr(void) {
-	// TODO: Implement CH592 ISR detection
-	// Check if currently executing in interrupt context
-	// Example: return __get_IPSR() != 0;  // ARM Cortex-M
-	return (*PFIC->ISR & 0xFF) != 0;
+	return (PFIC->GISR & (1U << 8)) != 0;
 }
 
 // CH592 interrupt handlers
@@ -56,8 +53,7 @@ void RTC_IRQHandler(void) {
 }
 
 /* This is called by NimBLE radio driver to set interrupt handlers */
-void
-npl_freertos_hw_set_isr(int irqn, void (* addr)(void)) {
+void npl_freertos_hw_set_isr(int irqn, void (* addr)(void)) {
 	// TODO: Map CH592 IRQ numbers - check CH59x_common.h or startup file
 	switch (irqn) {
 		case 0: // TODO: Replace with CH592_RADIO_IRQn or BLE_IRQn

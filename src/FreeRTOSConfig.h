@@ -123,7 +123,7 @@
 #define configUSE_COUNTING_SEMAPHORES	1
 #define configGENERATE_RUN_TIME_STATS	0
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION 0
-
+#define INCLUDE_uxTaskGetStackHighWaterMark 1
 /* Co-routine definitions. */
 #define configUSE_CO_ROUTINES 			0
 #define configMAX_CO_ROUTINE_PRIORITIES ( 2 )
@@ -153,6 +153,8 @@ to exclude the API function. */
 #define INCLUDE_xTaskAbortDelay				1
 #define INCLUDE_xTaskGetHandle				1
 #define INCLUDE_xSemaphoreGetMutexHolder	1
+/* TODO: critical nesting tracking MAY BE required by NimBLE */
+// #define portCRITICAL_NESTING_IN_TCB 1
 
 
 /* Normal assert() semantics without relying on the provision of an assert.h

@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <NimBLEDevice.h>
 #include "CH59x_uart.h"
+#include <utils/debug_utils.h>
 
 // Uart Serials(&R32_UART0_CTRL);
 volatile uint32_t loopCounter = 0;
@@ -248,27 +249,26 @@ class DescriptorCallbacks: public NimBLEDescriptorCallbacks {
 } dscCallbacks;
 
 void setup() {
-	// Check if we got here with valid stack
-	register uint32_t sp_val asm("sp");
-	register uint32_t ra_val asm("ra");
-
-	volatile uint32_t debug_sp = sp_val;
-	volatile uint32_t debug_ra = ra_val;
-
+	UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+	PrintHex(watermark);
+	PrintHex(0xaBaaaaa0);
 	pinMode(PA8, OUTPUT);
+	PrintHex(0xaBaaaaa1);
 	digitalWrite(PA8, HIGH); // Force known state first
+
+	PrintHex(0xaBaaaaa2);
 	delay(1000);
+	PrintHex(0xaBaaaaa3);
 	digitalWrite(PA8, LOW);
-	// GPIOA_SetBits(bTXD1);
-	// GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
-	// 	funPinMode(PB4, GPIO_ModeIN_PU); // RX0 (PB4)
-	// 	funPinMode(PB7, GPIO_ModeOut_PP_5mA); // TX0 (PB7)
-	// 	printf("UART0 initialized\r\n");
+	PrintHex(0xaBaaaaa4);
 	pinMode(PB4, INPUT); // RX0 (PB4)
 	pinMode(PB7, OUTPUT); // TX0 (PB7)
 	UART0_DefInit();
 
-	// NimBLEDevice::init("NimBLECH59x");
+	PrintHex(0xaBaaaaa5);
+	watermark = uxTaskGetStackHighWaterMark(NULL);
+	PrintHex(watermark);
+	NimBLEDevice::init("NimBLECH59x");
 	// pServer = NimBLEDevice::createServer();
 	// pServer->setCallbacks(&serverCallbacks);
 	//
@@ -319,4 +319,8 @@ void vApplicationIdleHook(void) {
 	idleCounter++; // Watch this increment
 }
 
+void abort(void) {
+	Serialprintf("ABORT called!");
+	while (1); // Stop here in debugger
+}
 }

@@ -23,6 +23,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
+#include <utils/debug_utils.h>
 #include <FreeRTOS.h>
 #include "nimble/porting/nimble/include/os/queue.h"
 #include <semphr.h>
@@ -682,9 +683,7 @@ ble_npl_hw_set_isr(int irqn, void (*addr)(void))
 static inline bool
 ble_npl_hw_is_in_critical(void)
 {
-    // TODO: implement properly
-    return false;
-    // return (uxGetCriticalNestingDepth() > 0);
+    return (uxGetCriticalNestingDepth() > 0);
 }
 #endif
 
