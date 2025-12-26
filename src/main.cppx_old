@@ -1,0 +1,49 @@
+#if defined(CH58X)
+#include "CH58x_common.h"
+#elif defined(CH59X)
+#include "CH59x_common.h"
+#endif
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "stdarg.h"
+
+void task1_task(void *pvParameters) {
+	while (1) {
+		vTaskDelay(100);
+	}
+}
+
+int main(void) {
+#if(defined(DCDC_ENABLE)) && (DCDC_ENABLE == TRUE)
+	PWR_DCDCCfg(ENABLE);
+#endif
+	SetSysClock(CLK_SOURCE_PLL_60MHz);
+#if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
+	GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+	GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+#endif
+#ifdef DEBUG
+	GPIOA_SetBits(bTXD1);
+	GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
+	UART1_DefInit();
+#endif
+
+	PRINT("start.\n");
+
+	xTaskCreate(
+		(TaskFunction_t)task1_task,
+		(const char*)"task1",
+		512,
+		(void*)NULL,
+		1,
+		NULL
+	);
+	uint8_t txPower = LL_TX_POWER_0_DBM;
+	RFCoreInit(txPower);
+
+	vTaskStartScheduler();
+	while (1) {
+		PRINT("shouldn't run at here!!\n");
+	}
+}
