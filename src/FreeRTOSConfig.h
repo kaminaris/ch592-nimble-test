@@ -107,7 +107,7 @@
 #if defined(CH58X)
 #define configTOTAL_HEAP_SIZE			( ( size_t ) ( 16 * 1024 ) )
 #elif defined(CH59X)
-#define configTOTAL_HEAP_SIZE			( ( size_t ) ( 3 * 1024 ) )
+#define configTOTAL_HEAP_SIZE			( ( size_t ) ( 5 * 1024 ) )
 #endif
 #define configMAX_TASK_NAME_LEN			( 16 )
 #define configUSE_TRACE_FACILITY		0

@@ -17,55 +17,31 @@
  * under the License.
  */
 
-#if defined(ARDUINO_ARCH_NRF5) && (defined(NRF52_SERIES) || defined(NRF53_SERIES))
-
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
-#include <nimble/nimble/controller/include/controller/ble_fem.h>
-#include <hal/nrf_radio.h>
-#include <hal/nrf_ccm.h>
-#include <hal/nrf_aar.h>
-#include <hal/nrf_timer.h>
-#include <hal/nrf_rtc.h>
 #include "syscfg/syscfg.h"
 #include "nimble/porting/nimble/include/os/os.h"
 /* Keep os_cputime explicitly to enable build on non-Mynewt platforms */
 #include "nimble/porting/nimble/include/os/os_cputime.h"
-#include "nimble/nimble/drivers/nrf5x/include/ble/xcvr.h"
 #include "nimble/nimble/include/nimble/ble.h"
 #include "nimble/nimble/include/nimble/nimble_opt.h"
 #include "nimble/nimble/include/nimble/nimble_npl.h"
 #include "nimble/nimble/controller/include/controller/ble_phy.h"
-#include "nimble/nimble/controller/include/controller/ble_phy_trace.h"
 #include "nimble/nimble/controller/include/controller/ble_ll.h"
-#include "nrfx.h"
-#if MYNEWT
-#ifdef NRF52_SERIES
-#include <mcu/nrf52_clock.h>
-#endif
-#ifdef NRF53_SERIES
-#include <mcu/nrf5340_net_clock.h>
-#endif
-#include "mcu/cmsis_nvic.h"
-#include "nimble/porting/nimble/include/hal/hal_gpio.h"
-#else
-#include <hal/nrf_clock.h>
-#ifdef NRF52_SERIES
-#include "core_cm4.h"
-#endif
-#endif
-#include <nrf_erratas.h>
-#include "phy_priv.h"
+#include "nimble/nimble/controller/include/controller/ble_phy_trace.h"
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
-#if !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52840) && \
-    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52811) && \
-    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF5340_NET) && \
-    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52833) && \
-    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52820)
-#error LE Coded PHY can only be enabled on nRF52811, nRF52820, nRF52833, nRF52840 or nRF5340
+#error LE Coded PHY cannot be enabled for CH59x
 #endif
+
+#ifndef min
+#define min(a, b) ((a)<(b)?(a):(b))
+#endif
+
+// CH592 radio IRQ is mapped to LLE_IRQn probably
+#ifndef RADIO_IRQn
+#define RADIO_IRQn         LLE_IRQn
 #endif
 
 #if BABBLESIM
@@ -74,27 +50,14 @@ extern void tm_tick(void);
 
 #include <nimble/nimble/controller/include/controller/ble_ll_pdu.h>
 
-#ifndef min
-#define min(a, b) ((a)<(b)?(a):(b))
-#endif
+static void ble_phy_isr(void);
 
-/*
- * NOTE: This code uses a couple of PPI channels so care should be taken when
- *       using PPI somewhere else.
- *
- * Pre-programmed channels: CH20, CH21, CH23, CH25, CH31
- * Regular channels: CH4, CH5 and optionally CH6, CH7, CH17, CH18, CH19
- *  - CH4 = cancel wfr timer on address match
- *  - CH5 = disable radio on wfr timer expiry
- *  - CH6 = PA/LNA control (enable)
- *  - CH7 = PA/LNA control (disable)
- *  - CH17 = (optional) gpio debug for radio ramp-up
- *  - CH18 = (optional) gpio debug for wfr timer RX enabled
- *  - CH19 = (optional) gpio debug for wfr timer radio disabled
- *
- */
-
-/* XXX: 4) Make sure RF is higher priority interrupt than schedule */
+#include "../include/ble/xcvr.h"
+#include "../include/ble/iSLER.h"
+// #include "nimble/ble.h"
+// #include "nimble/nimble_opt.h"
+// #include "controller/ble_phy.h"
+// #include "controller/ble_ll.h"
 
 /*
  * XXX: Maximum possible transmit time is 1 msec for a 60ppm crystal
@@ -102,81 +65,55 @@ extern void tm_tick(void);
  * crystal accuracy. Look at this in the spec.
  */
 
-/* XXX: private header file? */
-extern uint8_t g_nrf_num_irks;
-extern uint32_t g_nrf_irk_list[];
-
-/* To disable all radio interrupts */
-#define NRF_RADIO_IRQ_MASK_ALL  (0x34FF)
-
-/*
- * We configure the nrf with a 1 byte S0 field, 8 bit length field, and
- * zero bit S1 field. The preamble is 8 bits long.
- */
-#define NRF_LFLEN_BITS          (8)
-#define NRF_S0LEN               (1)
-#define NRF_S1LEN_BITS          (0)
-#define NRF_CILEN_BITS          (2)
-#define NRF_TERMLEN_BITS        (3)
-
-/* Maximum length of frames */
-#define NRF_MAXLEN              (255)
-#define NRF_BALEN               (3)     /* For base address of 3 bytes */
-
-/* NRF_RADIO->PCNF0 configuration values */
-#define NRF_PCNF0               (NRF_LFLEN_BITS << RADIO_PCNF0_LFLEN_Pos) | \
-                                (RADIO_PCNF0_S1INCL_Msk) | \
-                                (NRF_S0LEN << RADIO_PCNF0_S0LEN_Pos) | \
-                                (NRF_S1LEN_BITS << RADIO_PCNF0_S1LEN_Pos)
-#define NRF_PCNF0_1M            (NRF_PCNF0) | \
-                                (RADIO_PCNF0_PLEN_8bit << RADIO_PCNF0_PLEN_Pos)
-#define NRF_PCNF0_2M            (NRF_PCNF0) | \
-                                (RADIO_PCNF0_PLEN_16bit << RADIO_PCNF0_PLEN_Pos)
-#define NRF_PCNF0_CODED         (NRF_PCNF0) | \
-                                (RADIO_PCNF0_PLEN_LongRange << RADIO_PCNF0_PLEN_Pos) | \
-                                (NRF_CILEN_BITS << RADIO_PCNF0_CILEN_Pos) | \
-                                (NRF_TERMLEN_BITS << RADIO_PCNF0_TERMLEN_Pos)
-
-/* BLE PHY data structure */
+/* Forward declarations */
+// uint32_t accessAddress = 0x8E89BED6;
+// uint32_t crcInit = 0x555555;
+// //TODO: no idea if this is correct
+// uint8_t channelSet = 37;
+// int txPowerLevel = 0;
 struct ble_phy_obj
 {
-    uint8_t phy_stats_initialized;
-    int8_t  phy_txpwr_dbm;
-    uint8_t phy_chan;
-    uint8_t phy_state;
-    uint8_t phy_transition;
-    uint8_t phy_transition_late;
-    uint8_t phy_rx_started;
-    uint8_t phy_encrypted;
+	uint8_t phy_stats_initialized;
+	int8_t  phy_txpwr_dbm;
+	uint8_t phy_chan;
+	uint8_t phy_state;
+	uint8_t phy_transition;
+	uint8_t phy_transition_late;
+	uint8_t phy_rx_started;
+	uint8_t phy_encrypted;
 #if PHY_USE_HEADERMASK_WORKAROUND
-    uint8_t phy_headermask;
-    uint8_t phy_headerbyte;
+	uint8_t phy_headermask;
+	uint8_t phy_headerbyte;
 #endif
-    uint8_t phy_privacy;
-    uint8_t phy_tx_pyld_len;
-    uint8_t phy_cur_phy_mode;
-    uint8_t phy_tx_phy_mode;
-    uint8_t phy_rx_phy_mode;
-    uint8_t phy_bcc_offset;
-    uint32_t phy_aar_scratch;
-    uint32_t phy_access_address;
-    struct ble_mbuf_hdr rxhdr;
-    void *txend_arg;
-    ble_phy_tx_end_func txend_cb;
-    uint32_t phy_start_cputime;
+	uint8_t phy_privacy;
+	uint8_t phy_tx_pyld_len;
+	uint8_t phy_cur_phy_mode;
+	uint8_t phy_tx_phy_mode;
+	uint8_t phy_rx_phy_mode;
+	uint8_t phy_bcc_offset;
+	uint32_t phy_aar_scratch;
+	uint32_t phy_access_address;
+	uint32_t g_tx_end_time;
+	uint32_t g_aa_timestamp;
+    uint32_t g_rxen_timestamp;
+	struct ble_mbuf_hdr rxhdr;
+	void *txend_arg;
+	ble_phy_tx_end_func txend_cb;
+	uint32_t phy_start_cputime;
 #if MYNEWT_VAL(BLE_PHY_VARIABLE_TIFS)
-    uint16_t tifs;
+	uint16_t tifs;
 #endif
 
-    uint16_t txtx_time_us;
-    uint8_t txtx_time_anchor;
+	uint16_t txtx_time_us;
+	uint8_t txtx_time_anchor;
 };
 static struct ble_phy_obj g_ble_phy_data;
 
 /* XXX: if 27 byte packets desired we can make this smaller */
 /* Global transmit/receive buffer */
-static uint32_t g_ble_phy_tx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
-static uint32_t g_ble_phy_rx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
+// TODO: not sure if aligning this is necessary on CH59x
+__attribute__((aligned(4))) static uint32_t g_ble_phy_tx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
+__attribute__((aligned(4))) static uint32_t g_ble_phy_rx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
 /* Make sure word-aligned for faster copies */
@@ -185,19 +122,19 @@ static uint32_t g_ble_phy_enc_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
 
 /* RF center frequency for each channel index (offset from 2400 MHz) */
 static const uint8_t g_ble_phy_chan_freq[BLE_PHY_NUM_CHANS] = {
-     4,  6,  8, 10, 12, 14, 16, 18, 20, 22, /* 0-9 */
-    24, 28, 30, 32, 34, 36, 38, 40, 42, 44, /* 10-19 */
-    46, 48, 50, 52, 54, 56, 58, 60, 62, 64, /* 20-29 */
-    66, 68, 70, 72, 74, 76, 78,  2, 26, 80, /* 30-39 */
+	4,  6,  8, 10, 12, 14, 16, 18, 20, 22, /* 0-9 */
+   24, 28, 30, 32, 34, 36, 38, 40, 42, 44, /* 10-19 */
+   46, 48, 50, 52, 54, 56, 58, 60, 62, 64, /* 20-29 */
+   66, 68, 70, 72, 74, 76, 78,  2, 26, 80, /* 30-39 */
 };
 
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
 /* packet start offsets (in usecs) */
 static const uint16_t g_ble_phy_mode_pkt_start_off[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 40,
-    [BLE_PHY_MODE_2M] = 24,
-    [BLE_PHY_MODE_CODED_125KBPS] = 376,
-    [BLE_PHY_MODE_CODED_500KBPS] = 376
+	[BLE_PHY_MODE_1M] = 40,
+	[BLE_PHY_MODE_2M] = 24,
+	[BLE_PHY_MODE_CODED_125KBPS] = 376,
+	[BLE_PHY_MODE_CODED_500KBPS] = 376
 };
 #endif
 
@@ -209,117 +146,54 @@ static const uint16_t g_ble_phy_mode_pkt_start_off[BLE_PHY_NUM_MODE] = {
 #if BABBLESIM
 /* delay between EVENTS_READY and start of tx */
 static const uint8_t g_ble_phy_t_txdelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 1,
-    [BLE_PHY_MODE_2M] = 1,
+	[BLE_PHY_MODE_1M] = 1,
+	[BLE_PHY_MODE_2M] = 1,
 };
 /* delay between EVENTS_END and end of txd packet */
 static const uint8_t g_ble_phy_t_txenddelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 1,
-    [BLE_PHY_MODE_2M] = 1,
+	[BLE_PHY_MODE_1M] = 1,
+	[BLE_PHY_MODE_2M] = 1,
 };
 /* delay between rxd access address (w/ TERM1 for coded) and EVENTS_ADDRESS */
 static const uint8_t g_ble_phy_t_rxaddrdelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 9,
-    [BLE_PHY_MODE_2M] = 5,
+	[BLE_PHY_MODE_1M] = 9,
+	[BLE_PHY_MODE_2M] = 5,
 };
 /* delay between end of rxd packet and EVENTS_END */
 static const uint8_t g_ble_phy_t_rxenddelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 9,
-    [BLE_PHY_MODE_2M] = 5,
+	[BLE_PHY_MODE_1M] = 9,
+	[BLE_PHY_MODE_2M] = 5,
 };
 #else
 /* delay between EVENTS_READY and start of tx */
 static const uint8_t g_ble_phy_t_txdelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 4,
-    [BLE_PHY_MODE_2M] = 3,
-    [BLE_PHY_MODE_CODED_125KBPS] = 5,
-    [BLE_PHY_MODE_CODED_500KBPS] = 5
+	[BLE_PHY_MODE_1M] = 4,
+	[BLE_PHY_MODE_2M] = 3,
+	[BLE_PHY_MODE_CODED_125KBPS] = 5,
+	[BLE_PHY_MODE_CODED_500KBPS] = 5
 };
 /* delay between EVENTS_END and end of txd packet */
 static const uint8_t g_ble_phy_t_txenddelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 4,
-    [BLE_PHY_MODE_2M] = 3,
-    [BLE_PHY_MODE_CODED_125KBPS] = 9,
-    [BLE_PHY_MODE_CODED_500KBPS] = 3
+	[BLE_PHY_MODE_1M] = 4,
+	[BLE_PHY_MODE_2M] = 3,
+	[BLE_PHY_MODE_CODED_125KBPS] = 9,
+	[BLE_PHY_MODE_CODED_500KBPS] = 3
 };
 /* delay between rxd access address (w/ TERM1 for coded) and EVENTS_ADDRESS */
 static const uint8_t g_ble_phy_t_rxaddrdelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 6,
-    [BLE_PHY_MODE_2M] = 2,
-    [BLE_PHY_MODE_CODED_125KBPS] = 17,
-    [BLE_PHY_MODE_CODED_500KBPS] = 17
+	[BLE_PHY_MODE_1M] = 6,
+	[BLE_PHY_MODE_2M] = 2,
+	[BLE_PHY_MODE_CODED_125KBPS] = 17,
+	[BLE_PHY_MODE_CODED_500KBPS] = 17
 };
 /* delay between end of rxd packet and EVENTS_END */
 static const uint8_t g_ble_phy_t_rxenddelay[BLE_PHY_NUM_MODE] = {
-    [BLE_PHY_MODE_1M] = 6,
-    [BLE_PHY_MODE_2M] = 2,
-    [BLE_PHY_MODE_CODED_125KBPS] = 27,
-    [BLE_PHY_MODE_CODED_500KBPS] = 22
+	[BLE_PHY_MODE_1M] = 6,
+	[BLE_PHY_MODE_2M] = 2,
+	[BLE_PHY_MODE_CODED_125KBPS] = 27,
+	[BLE_PHY_MODE_CODED_500KBPS] = 22
 };
 #endif
-
-/* Statistics */
-STATS_SECT_START(ble_phy_stats)
-    STATS_SECT_ENTRY(phy_isrs)
-    STATS_SECT_ENTRY(tx_good)
-    STATS_SECT_ENTRY(tx_fail)
-    STATS_SECT_ENTRY(tx_late)
-    STATS_SECT_ENTRY(tx_bytes)
-    STATS_SECT_ENTRY(rx_starts)
-    STATS_SECT_ENTRY(rx_aborts)
-    STATS_SECT_ENTRY(rx_valid)
-    STATS_SECT_ENTRY(rx_crc_err)
-    STATS_SECT_ENTRY(rx_late)
-    STATS_SECT_ENTRY(radio_state_errs)
-    STATS_SECT_ENTRY(rx_hw_err)
-    STATS_SECT_ENTRY(tx_hw_err)
-STATS_SECT_END
-STATS_SECT_DECL(ble_phy_stats) ble_phy_stats;
-
-STATS_NAME_START(ble_phy_stats)
-    STATS_NAME(ble_phy_stats, phy_isrs)
-    STATS_NAME(ble_phy_stats, tx_good)
-    STATS_NAME(ble_phy_stats, tx_fail)
-    STATS_NAME(ble_phy_stats, tx_late)
-    STATS_NAME(ble_phy_stats, tx_bytes)
-    STATS_NAME(ble_phy_stats, rx_starts)
-    STATS_NAME(ble_phy_stats, rx_aborts)
-    STATS_NAME(ble_phy_stats, rx_valid)
-    STATS_NAME(ble_phy_stats, rx_crc_err)
-    STATS_NAME(ble_phy_stats, rx_late)
-    STATS_NAME(ble_phy_stats, radio_state_errs)
-    STATS_NAME(ble_phy_stats, rx_hw_err)
-    STATS_NAME(ble_phy_stats, tx_hw_err)
-STATS_NAME_END(ble_phy_stats)
-
-/*
- * NOTE:
- * Tested the following to see what would happen:
- *  -> NVIC has radio irq enabled (interrupt # 1, mask 0x2).
- *  -> Set up nrf to receive. Clear ADDRESS event register.
- *  -> Enable ADDRESS interrupt on nrf5 by writing to INTENSET.
- *  -> Enable RX.
- *  -> Disable interrupts globally using OS_ENTER_CRITICAL().
- *  -> Wait until a packet is received and the ADDRESS event occurs.
- *  -> Call ble_phy_disable().
- *
- *  At this point I wanted to see the state of the cortex NVIC. The IRQ
- *  pending bit was TRUE for the radio interrupt (as expected) as we never
- *  serviced the radio interrupt (interrupts were disabled).
- *
- *  What was unexpected was this: without clearing the pending IRQ in the NVIC,
- *  when radio interrupts were re-enabled (address event bit in INTENSET set to
- *  1) and the radio ADDRESS event register read 1 (it was never cleared after
- *  the first address event), the radio did not enter the ISR! I would have
- *  expected that if the following were true, an interrupt would occur:
- *      -> NVIC ISER bit set to TRUE
- *      -> NVIC ISPR bit reads TRUE, meaning interrupt is pending.
- *      -> Radio peripheral interrupts are enabled for some event (or events).
- *      -> Corresponding event register(s) in radio peripheral read 1.
- *
- *  Not sure what the end result of all this is. We will clear the pending
- *  bit in the NVIC just to be sure when we disable the PHY.
- */
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
 
@@ -337,10 +211,10 @@ static uint32_t g_nrf_encrypt_scratchpad[NRF_ENC_SCRATCH_WORDS];
 
 struct nrf_ccm_data
 {
-    uint8_t key[16];
-    uint64_t pkt_counter;
-    uint8_t dir_bit;
-    uint8_t iv[8];
+	uint8_t key[16];
+	uint64_t pkt_counter;
+	uint8_t dir_bit;
+	uint8_t iv[8];
 } __attribute__((packed));
 
 struct nrf_ccm_data g_nrf_ccm_data;
@@ -392,67 +266,46 @@ phy_nrf52_errata_191(uint8_t new_phy_mode)
 static void
 ble_phy_mode_apply(uint8_t phy_mode)
 {
-    if (phy_mode == g_ble_phy_data.phy_cur_phy_mode) {
-        return;
-    }
+	if (phy_mode == g_ble_phy_data.phy_cur_phy_mode) {
+		return;
+	}
 
-#if NRF52_ERRATA_191_ENABLE_WORKAROUND
-    if (nrf52_errata_191()) {
-        phy_nrf52_errata_191(phy_mode);
-    }
-#endif
-
-    switch (phy_mode) {
-    case BLE_PHY_MODE_1M:
-        NRF_RADIO->MODE = RADIO_MODE_MODE_Ble_1Mbit;
-#ifdef NRF53_SERIES
-        *((volatile uint32_t *)0x41008588) = *((volatile uint32_t *)0x01FF0080);
-#endif
-        NRF_RADIO->PCNF0 = NRF_PCNF0_1M;
-        break;
+    // TODO: those should be NOP probably or ISLER needs a change
+	switch (phy_mode) {
+		case BLE_PHY_MODE_1M:
+	        BB->CTRL_CFG = CTRL_CFG_PHY_1M;
+			break;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_2M_PHY)
-    case BLE_PHY_MODE_2M:
-        NRF_RADIO->MODE = RADIO_MODE_MODE_Ble_2Mbit;
-#ifdef NRF53_SERIES
-        *((volatile uint32_t *)0x41008588) = *((volatile uint32_t *)0x01FF0084);
-#endif
-        NRF_RADIO->PCNF0 = NRF_PCNF0_2M;
-        break;
+		case BLE_PHY_MODE_2M:
+	        BB->CTRL_CFG = CTRL_CFG_PHY_2M;
+			break;
 #endif
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
-    case BLE_PHY_MODE_CODED_125KBPS:
-        NRF_RADIO->MODE = RADIO_MODE_MODE_Ble_LR125Kbit;
-#ifdef NRF53_SERIES
-        *((volatile uint32_t *)0x41008588) = *((volatile uint32_t *)0x01FF0080);
+		case BLE_PHY_MODE_CODED_125KBPS:
+			// TODO: coded phy not supported yet
+			break;
+		case BLE_PHY_MODE_CODED_500KBPS:
+	        // TODO: coded phy not supported yet
+			break;
 #endif
-        NRF_RADIO->PCNF0 = NRF_PCNF0_CODED;
-        break;
-    case BLE_PHY_MODE_CODED_500KBPS:
-        NRF_RADIO->MODE = RADIO_MODE_MODE_Ble_LR500Kbit;
-#ifdef NRF53_SERIES
-        *((volatile uint32_t *)0x41008588) = *((volatile uint32_t *)0x01FF0080);
-#endif
-        NRF_RADIO->PCNF0 = NRF_PCNF0_CODED;
-        break;
-#endif
-    default:
-        assert(0);
-    }
+		default:
+			assert(0);
+	}
 
-    g_ble_phy_data.phy_cur_phy_mode = phy_mode;
+	g_ble_phy_data.phy_cur_phy_mode = phy_mode;
 }
 
 void
 ble_phy_mode_set(uint8_t tx_phy_mode, uint8_t rx_phy_mode)
 {
-    g_ble_phy_data.phy_tx_phy_mode = tx_phy_mode;
-    g_ble_phy_data.phy_rx_phy_mode = rx_phy_mode;
+	g_ble_phy_data.phy_tx_phy_mode = tx_phy_mode;
+	g_ble_phy_data.phy_rx_phy_mode = rx_phy_mode;
 }
 #else
 static uint32_t
 ble_phy_mode_pdu_start_off(int phy_mode)
 {
-    return 40;
+	return 40;
 }
 #endif
 
@@ -460,20 +313,20 @@ static int
 ble_phy_get_cur_phy(void)
 {
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
-    switch (g_ble_phy_data.phy_cur_phy_mode) {
-        case BLE_PHY_MODE_1M:
-            return BLE_PHY_1M;
-        case BLE_PHY_MODE_2M:
-            return BLE_PHY_2M;
-        case BLE_PHY_MODE_CODED_125KBPS:
-        case BLE_PHY_MODE_CODED_500KBPS:
-            return BLE_PHY_CODED;
-        default:
-            assert(0);
-            return -1;
-    }
+	switch (g_ble_phy_data.phy_cur_phy_mode) {
+		case BLE_PHY_MODE_1M:
+			return BLE_PHY_1M;
+		case BLE_PHY_MODE_2M:
+			return BLE_PHY_2M;
+		case BLE_PHY_MODE_CODED_125KBPS:
+		case BLE_PHY_MODE_CODED_500KBPS:
+			return BLE_PHY_CODED;
+		default:
+			assert(0);
+			return -1;
+	}
 #else
-    return BLE_PHY_1M;
+	return BLE_PHY_1M;
 #endif
 }
 
@@ -532,20 +385,22 @@ ble_phy_rxpdu_copy(uint8_t *dptr, struct os_mbuf *rxpdu)
         dst += copy_len;
         src += copy_len;
 #else
-        __asm__ volatile (".syntax unified              \n"
-                          "   mov  r4, %[len]           \n"
-                          "   b    2f                   \n"
-                          "1: ldr  r3, [%[src], %[len]] \n"
-                          "   str  r3, [%[dst], %[len]] \n"
-                          "2: subs %[len], #4           \n"
-                          "   bpl  1b                   \n"
-                          "   adds %[src], %[src], r4   \n"
-                          "   adds %[dst], %[dst], r4   \n"
-                          : [dst] "+r" (dst), [src] "+r" (src),
-                            [len] "+r" (copy_len)
-                          :
-                          : "r3", "r4", "memory"
-                         );
+        __asm__ volatile (
+            "   mv   t1, %[len]           \n"  // Save original length in t1 (like r4)
+            "   j    2f                   \n"  // Jump to loop condition
+            "1: add  t0, %[src], %[len]   \n"  // Calculate src address
+            "   lw   t2, 0(t0)            \n"  // Load word from [src + len]
+            "   add  t0, %[dst], %[len]   \n"  // Calculate dst address
+            "   sw   t2, 0(t0)            \n"  // Store word to [dst + len]
+            "2: addi %[len], %[len], -4   \n"  // len -= 4
+            "   bgez %[len], 1b           \n"  // Branch if len >= 0
+            "   add  %[src], %[src], t1   \n"  // Restore src pointer
+            "   add  %[dst], %[dst], t1   \n"  // Restore dst pointer
+            : [dst] "+r" (dst), [src] "+r" (src),
+              [len] "+r" (copy_len)
+            :
+            : "t0", "t1", "t2", "memory"
+        );
 #endif
 
         if ((rem_len < 4) && (block_rem_len >= rem_len)) {
@@ -563,16 +418,18 @@ ble_phy_rxpdu_copy(uint8_t *dptr, struct os_mbuf *rxpdu)
 #if BABBLESIM
     memcpy(dst, src, rem_len);
 #else
-    __asm__ volatile (".syntax unified              \n"
-                      "   b    2f                   \n"
-                      "1: ldrb r3, [%[src], %[len]] \n"
-                      "   strb r3, [%[dst], %[len]] \n"
-                      "2: subs %[len], #1           \n"
-                      "   bpl  1b                   \n"
-                      : [len] "+r" (rem_len)
-                      : [dst] "r" (dst), [src] "r" (src)
-                      : "r3", "memory"
-                     );
+    __asm__ volatile (
+        "   j    2f                   \n"  // Jump to loop condition
+        "1: add  t0, %[src], %[len]   \n"  // Calculate src address
+        "   lbu  t1, 0(t0)            \n"  // Load byte from [src + len]
+        "   add  t0, %[dst], %[len]   \n"  // Calculate dst address
+        "   sb   t1, 0(t0)            \n"  // Store byte to [dst + len]
+        "2: addi %[len], %[len], -1   \n"  // len -= 1
+        "   bgez %[len], 1b           \n"  // Branch if len >= 0
+        : [len] "+r" (rem_len)
+        : [dst] "r" (dst), [src] "r" (src)
+        : "t0", "t1", "memory"
+    );
 #endif
 
     /* Copy header */
@@ -588,29 +445,21 @@ ble_phy_rxpdu_copy(uint8_t *dptr, struct os_mbuf *rxpdu)
 static void
 nrf_wait_disabled(void)
 {
-    uint32_t state;
+	uint32_t state;
 
-    state = NRF_RADIO->STATE;
-    if (state != RADIO_STATE_STATE_Disabled) {
-        if ((state == RADIO_STATE_STATE_RxDisable) ||
-            (state == RADIO_STATE_STATE_TxDisable)) {
-            /* This will end within a short time (6 usecs). Just poll */
-            while (NRF_RADIO->STATE == state) {
-                /* If this fails, something is really wrong. Should last
-                 * no more than 6 usecs */
+	//state = LL->STATUS;
+    // TODO: no idea how to handle this, just a NOP for now
+
 #if BABBLESIM
-                tm_tick();
+				tm_tick();
 #endif
-            }
-        }
-    }
 }
 
 #if MYNEWT_VAL(BLE_PHY_VARIABLE_TIFS)
 void
 ble_phy_tifs_set(uint16_t tifs)
 {
-    g_ble_phy_data.tifs = tifs;
+	g_ble_phy_data.tifs = tifs;
 }
 #endif
 
@@ -626,9 +475,6 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
     uint32_t cntr;
     uint32_t delta;
     int radio_rem_us;
-#if PHY_USE_FEM
-    int fem_rem_us = 0;
-#endif
     int rem_us_corr;
     int min_rem_us;
 
@@ -638,39 +484,17 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
     if (tx) {
         radio_rem_us = rem_us - BLE_PHY_T_TXENFAST -
                        g_ble_phy_t_txdelay[g_ble_phy_data.phy_cur_phy_mode];
-#if PHY_USE_FEM_PA
-        fem_rem_us = rem_us - MYNEWT_VAL(BLE_FEM_PA_TURN_ON_US);
-#endif
     } else {
         radio_rem_us = rem_us - BLE_PHY_T_TXENFAST;
-#if PHY_USE_FEM_LNA
-        fem_rem_us = rem_us - MYNEWT_VAL(BLE_FEM_LNA_TURN_ON_US);
-#endif
     }
 
-#if PHY_USE_FEM
-    min_rem_us = min(radio_rem_us, fem_rem_us);
-#else
     min_rem_us = radio_rem_us;
-#endif
 
     /* We need to adjust rem_us values, so they are >=1 for TIMER0 compare
      * event to be triggered.
-     *
-     * If FEM is not enabled, calculated rem_us is -45<=rem_us<=-15 since we
-     * only had to adjust earlier for ramp-up and txdelay, i.e. 40+5=45us in
-     * worst case, so we adjust by 1 or 2 tick(s) only.
-     *
-     * If FEM is enabled, turn on time may be a bit longer, so we also allow to
-     * adjust by 3 ticks so up to 90us which should be enough. If needed, we
-     * can extend this by another tick but having FEM with turn on time >90us
-     * means transition may become tricky.
      */
 
-    if ((PHY_USE_FEM) && (min_rem_us <= -61)) {
-        cputime -= 3;
-        rem_us_corr = 91;
-    } else if (min_rem_us <= -30) {
+    if (min_rem_us <= -30) {
         /* rem_us is -60..-30 */
         cputime -= 2;
         rem_us_corr = 61;
@@ -691,8 +515,9 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
      * need to account for it.
      */
     next_cc = cputime & 0xffffff;
-    cur_cc = NRF_RTC0->CC[0];
-    cntr = NRF_RTC0->COUNTER;
+    // TODO: is it correct register?
+    cur_cc = R32_RTC_TRIG;//NRF_RTC0->CC[0];
+    cntr = R32_RTC_CNT_32K; //NRF_RTC0->COUNTER;
 
     delta = (cur_cc - cntr) & 0xffffff;
     if ((delta <= 3) && (delta != 0)) {
@@ -704,36 +529,29 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
     }
 
     /* Clear and set TIMER0 to fire off at proper time */
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CLEAR);
-    nrf_timer_cc_set(NRF_TIMER0, 0, radio_rem_us + rem_us_corr);
-    NRF_TIMER0->EVENTS_COMPARE[0] = 0;
-#if PHY_USE_FEM
-    if (fem_rem_us) {
-        nrf_timer_cc_set(NRF_TIMER0, 2, fem_rem_us + rem_us_corr);
-        NRF_TIMER0->EVENTS_COMPARE[2] = 0;
-    }
-#endif
+    // CH592: Stop and clear TMR0
+    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
+    R32_TMR0_COUNT = 0;                     // Clear counter (not R32_TMR0_CNT)
+
+    // CH592: Set compare value for TMR0
+    R32_TMR0_CNT_END = radio_rem_us + rem_us_corr;
+
+    // CH592: Clear timer interrupt flag
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
     /* Set RTC compare to start TIMER0 */
-    NRF_RTC0->EVENTS_COMPARE[0] = 0;
-    nrf_rtc_cc_set(NRF_RTC0, 0, next_cc);
-    nrf_rtc_event_enable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
+    // CH592: Clear RTC trigger flag
+    R8_RTC_FLAG_CTRL |= RB_RTC_TRIG_CLR;
 
-    /* Enable PPI */
-#if PHY_USE_FEM
-    if (fem_rem_us) {
-        if (tx) {
-#if PHY_USE_FEM_PA
-            phy_fem_enable_pa();
-#endif
-        } else {
-#if PHY_USE_FEM_LNA
-            phy_fem_enable_lna();
-#endif
-        }
-    }
-#endif
-    phy_ppi_rtc0_compare0_to_timer0_start_enable();
+    // CH592: Set RTC trigger value
+    R32_RTC_TRIG = next_cc;
+
+    // CH592: Enable RTC trigger mode
+    R8_RTC_MODE_CTRL |= RB_RTC_TRIG_EN;
+
+    /* PPI equivalent - Manual trigger needed */
+    // CH592: No hardware PPI, you'll need to handle this in RTC interrupt:
+    // TODO: When RTC trigger fires, start TMR0 manually in the RTC ISR
 
     /* Store the cputime at which we set the RTC */
     g_ble_phy_data.phy_start_cputime = cputime;
@@ -741,15 +559,13 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
     return 0;
 }
 
+
 static int
 ble_phy_set_start_now(void)
 {
     os_sr_t sr;
     uint32_t now;
     uint32_t radio_rem_us;
-#if PHY_USE_FEM_LNA
-    uint32_t fem_rem_us;
-#endif
 
     OS_ENTER_CRITICAL(sr);
 
@@ -760,27 +576,21 @@ ble_phy_set_start_now(void)
      * Note that this is only used for rx, so only need to handle LNA.
      */
 
-#if PHY_USE_FEM_LNA
-    if (MYNEWT_VAL(BLE_FEM_LNA_TURN_ON_US) > BLE_PHY_T_RXENFAST) {
-        radio_rem_us = 1 + MYNEWT_VAL(BLE_FEM_LNA_TURN_ON_US) -
-                       BLE_PHY_T_RXENFAST;
-        fem_rem_us = 1;
-    } else {
-        radio_rem_us = 1;
-        fem_rem_us = 1 + BLE_PHY_T_RXENFAST -
-                     MYNEWT_VAL(BLE_FEM_LNA_TURN_ON_US);
-    }
-#else
     radio_rem_us = 1;
-#endif
 
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CLEAR);
-    nrf_timer_cc_set(NRF_TIMER0, 0, radio_rem_us);
-    NRF_TIMER0->EVENTS_COMPARE[0] = 0;
-#if PHY_USE_FEM_LNA
-    nrf_timer_cc_set(NRF_TIMER0, 2, fem_rem_us);
-    NRF_TIMER0->EVENTS_COMPARE[2] = 0;
-#endif
+    /* Clear and set TIMER0 to fire off at proper time */
+    // CH592: Stop timer
+    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
+
+    // CH592: Clear counter
+    R32_TMR0_COUNT = 0;
+
+    // CH592: Set compare value
+    R32_TMR0_CNT_END = radio_rem_us;
+
+    // CH592: Clear compare interrupt flag
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+
 
     /*
      * Set RTC compare to start TIMER0. We need to set it to at least N+2 ticks
@@ -789,16 +599,20 @@ ble_phy_set_start_now(void)
      * operations.
      */
     now = os_cputime_get32();
-    NRF_RTC0->EVENTS_COMPARE[0] = 0;
-    nrf_rtc_cc_set(NRF_RTC0, 0, (now + 3) & 0xffffff);
-    nrf_rtc_event_enable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
 
-#if PHY_USE_FEM_LNA
-    phy_fem_enable_lna();
-#endif
+    // CH592: Clear RTC trigger flag
+    R8_RTC_FLAG_CTRL |= RB_RTC_TRIG_CLR;
 
-    /* Enable PPI */
-    phy_ppi_rtc0_compare0_to_timer0_start_enable();
+    // CH592: Set RTC trigger value (N+3 ticks from now)
+    R32_RTC_TRIG = (now + 3) & 0xffffff;
+
+    // CH592: Enable RTC trigger mode
+    R8_RTC_MODE_CTRL |= RB_RTC_TRIG_EN;
+
+    /* Enable PPI equivalent - needs RTC ISR handler */
+    // CH592: No hardware PPI - must handle in RTC interrupt
+    // TODO: Make sure RTC interrupt is enabled to catch the trigger
+
 
     /*
      * Store the cputime at which we set the RTC
@@ -848,7 +662,7 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
 
     if (txrx == BLE_PHY_WFR_ENABLE_TXRX) {
         /* RX shall start exactly T_IFS after TX end captured in CC[2] */
-        end_time = NRF_TIMER0->CC[2] + tifs;
+        end_time = g_ble_phy_data.g_tx_end_time + tifs;
         /* Adjust for delay between EVENT_END and actual TX end time */
         end_time += g_ble_phy_t_txenddelay[tx_phy_mode];
         /* Wait a bit longer due to allowed active clock accuracy */
@@ -866,7 +680,7 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
          * CC[0] is the time of RXEN so adjust for radio ram-up.
          * Do not add jitter since this is already covered by LL.
          */
-        end_time = NRF_TIMER0->CC[0] + BLE_PHY_T_RXENFAST + wfr_usecs;
+        end_time = g_ble_phy_data.g_rxen_timestamp + BLE_PHY_T_RXENFAST + wfr_usecs;
     }
 
     /*
@@ -880,12 +694,18 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
     /* Adjust for delay between actual access address RX and EVENT_ADDRESS */
     end_time += g_ble_phy_t_rxaddrdelay[phy];
 
-    /* wfr_secs is the time from rxen until timeout */
-    nrf_timer_cc_set(NRF_TIMER0, 3, end_time);
-    NRF_TIMER0->EVENTS_COMPARE[3] = 0;
+    /* CH592: Set TMR0 compare value for wait-for-response timeout */
+    R32_TMR0_CNT_END = end_time;
+
+    /* CH592: Clear timer compare interrupt flag */
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
     /* Enable wait for response PPI */
-    phy_ppi_wfr_enable();
+    // CH592: No hardware PPI - handle timeout in TMR0 interrupt
+    // TODO: Enable TMR0 interrupt to trigger radio disable on timeout
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear flag again before enabling
+    R8_TMR0_INTER_EN |= RB_TMR_IE_CYC_END; // Enable compare interrupt
+
 
     /*
      * It may happen that if CPU is halted for a brief moment (e.g. during flash
@@ -899,10 +719,23 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
      * CC[1] is only used as a reference on RX start, we do not need it here so
      * it can be used to read TIMER0 counter.
      */
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CAPTURE1);
-    if (NRF_TIMER0->CC[1] > NRF_TIMER0->CC[3]) {
-        phy_ppi_wfr_disable();
-        nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+    /* CH592: Manually capture current timer value */
+    uint32_t current_time = R32_TMR0_COUNT;
+
+    /* Check if timer already passed the compare value (timeout already occurred) */
+    if (current_time > R32_TMR0_CNT_END) {
+        /* Timeout already happened - disable radio manually */
+
+        /* Disable TMR0 compare interrupt */
+        R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
+
+        /* Clear interrupt flag */
+        R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+
+        /* Trigger radio disable */
+        // TODO: Add CH592 radio disable command here
+        // This depends on your radio implementation
+        DevSetMode(0);
     }
 }
 
@@ -911,23 +744,23 @@ static uint32_t
 ble_phy_get_ccm_datarate(void)
 {
 #if BLE_LL_BT5_PHY_SUPPORTED
-    switch (g_ble_phy_data.phy_cur_phy_mode) {
-    case BLE_PHY_MODE_1M:
-        return CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos;
-    case BLE_PHY_MODE_2M:
-        return CCM_MODE_DATARATE_2Mbit << CCM_MODE_DATARATE_Pos;
+	switch (g_ble_phy_data.phy_cur_phy_mode) {
+		case BLE_PHY_MODE_1M:
+			return CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos;
+		case BLE_PHY_MODE_2M:
+			return CCM_MODE_DATARATE_2Mbit << CCM_MODE_DATARATE_Pos;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
-    case BLE_PHY_MODE_CODED_125KBPS:
-        return CCM_MODE_DATARATE_125Kbps << CCM_MODE_DATARATE_Pos;
-    case BLE_PHY_MODE_CODED_500KBPS:
-        return CCM_MODE_DATARATE_500Kbps << CCM_MODE_DATARATE_Pos;
+		case BLE_PHY_MODE_CODED_125KBPS:
+			return CCM_MODE_DATARATE_125Kbps << CCM_MODE_DATARATE_Pos;
+		case BLE_PHY_MODE_CODED_500KBPS:
+			return CCM_MODE_DATARATE_500Kbps << CCM_MODE_DATARATE_Pos;
 #endif
-    }
+	}
 
-    assert(0);
-    return 0;
+	assert(0);
+	return 0;
 #else
-    return CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos;
+	return CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos;
 #endif
 }
 #endif
@@ -961,7 +794,7 @@ ble_phy_rx_xcvr_setup(void)
         NRF_RADIO->PACKETPTR = (uint32_t)dptr;
     }
 #else
-    NRF_RADIO->PACKETPTR = (uint32_t)dptr;
+    LL->RXBUF = (uint32_t)dptr;
 #endif
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
@@ -980,8 +813,17 @@ ble_phy_rx_xcvr_setup(void)
 #endif
 
     /* Turn off trigger TXEN on output compare match and AAR on bcmatch */
-    phy_ppi_timer0_compare0_to_radio_txen_disable();
-    phy_ppi_radio_bcmatch_to_aar_start_disable();
+    /* CH592: Disable timer-to-radio and radio-to-AAR triggers */
+    /* No hardware PPI on CH592 - these are NOPs or handled differently */
+
+    /* Disable TMR0 compare interrupt that would trigger radio TXEN */
+    R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
+
+    /* Clear any pending timer interrupt */
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+
+    /* CH592: No AAR (Address Resolution) hardware equivalent */
+    /* If you implemented software AAR, disable its trigger here */
 
     /* Reset the rx started flag. Used for the wait for response */
     g_ble_phy_data.phy_rx_started = 0;
@@ -1003,20 +845,38 @@ ble_phy_rx_xcvr_setup(void)
 #endif
 
     /* I want to know when 1st byte received (after address) */
-    nrf_radio_bcc_set(NRF_RADIO, 8 + g_ble_phy_data.phy_bcc_offset); /* in bits */
-    NRF_RADIO->EVENTS_ADDRESS = 0;
-    NRF_RADIO->EVENTS_DEVMATCH = 0;
-    NRF_RADIO->EVENTS_BCMATCH = 0;
-    NRF_RADIO->EVENTS_RSSIEND = 0;
-    NRF_RADIO->EVENTS_CRCOK = 0;
-    NRF_RADIO->SHORTS = RADIO_SHORTS_END_DISABLE_Msk |
-                        RADIO_SHORTS_READY_START_Msk |
-                        RADIO_SHORTS_ADDRESS_BCSTART_Msk |
-                        RADIO_SHORTS_ADDRESS_RSSISTART_Msk |
-                        RADIO_SHORTS_DISABLED_RSSISTOP_Msk;
+    /* CH592: No bit counter compare (BCC) hardware */
+    /* The ISLER library doesn't expose bit-level events during reception */
 
-    nrf_radio_int_enable(NRF_RADIO, RADIO_INTENSET_ADDRESS_Msk |
-                         RADIO_INTENSET_DISABLED_Msk);
+    /* CH592: No event registers - reception is handled by ISLER internally */
+    /* These events don't exist on CH592:
+     * - EVENTS_ADDRESS: Access address match (hidden inside ISLER)
+     * - EVENTS_DEVMATCH: Device address match (no hardware support)
+     * - EVENTS_BCMATCH: Bit counter match (no hardware support)
+     * - EVENTS_RSSIEND: RSSI measurement complete (no separate event)
+     * - EVENTS_CRCOK: CRC validation (checked in ble_phy_isr after reception)
+     */
+
+    /* CH592: No SHORTS hardware */
+    /* These automatic state transitions don't exist:
+     * - END → DISABLE: Must call DevSetMode(0) manually after Frame_RX completes
+     * - READY → START: Automatically handled by Frame_RX()
+     * - ADDRESS → BCSTART: N/A (no bit counter)
+     * - ADDRESS → RSSISTART: Call ReadRSSI() in your ISR callback
+     * - DISABLED → RSSISTOP: N/A (RSSI is read on-demand)
+     */
+    NVIC_EnableIRQ(RADIO_IRQn);
+
+    /* CH592: Enable radio interrupt via ISLER callback */
+    /* Your ble_phy_isr() is called when LLE_IRQHandler() fires */
+    /* This happens ONLY when a complete frame is received */
+    /* No separate ADDRESS or DISABLED events available */
+
+    /* Note: In ble_phy_isr(), you can now access:
+     * - Received frame data in LLE_BUF
+     * - RSSI via ReadRSSI()
+     * - LL->STATUS for error flags (but they're cleared on entry)
+     */
 }
 
 /**
@@ -1031,11 +891,11 @@ ble_phy_tx_end_isr(void)
     uint8_t transition;
     uint32_t rx_time;
     uint32_t tx_time;
-#if PHY_USE_FEM
-    uint32_t fem_time;
-#endif
     uint32_t radio_time;
     uint16_t tifs;
+
+    /* CH592: Capture TX end time from TMR0 */
+    g_ble_phy_data.g_tx_end_time = R32_TMR0_COUNT;
 
     /* Store PHY on which we've just transmitted smth */
     tx_phy_mode = g_ble_phy_data.phy_cur_phy_mode;
@@ -1080,26 +940,29 @@ ble_phy_tx_end_isr(void)
         /* Packet pointer needs to be reset. */
         ble_phy_rx_xcvr_setup();
 
-        ble_phy_wfr_enable(BLE_PHY_WFR_ENABLE_TXRX, tx_phy_mode, 0);
+        /* CH592: Set up timer for RX start after TIFS */
+        // Stop timer
+        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
 
-        /* Schedule RX exactly T_IFS after TX end captured in CC[2] */
-        rx_time = NRF_TIMER0->CC[2] + tifs;
-        /* Adjust for delay between EVENT_END and actual TX end time */
+        // Clear counter
+        R32_TMR0_COUNT = 0;
+
+        // Calculate when to start RX (TX end + TIFS)
+        rx_time = g_ble_phy_data.g_tx_end_time + tifs;
         rx_time += g_ble_phy_t_txenddelay[tx_phy_mode];
-        /* Start listening a bit earlier due to allowed active clock accuracy */
-        rx_time -= 2;
+        rx_time += 2; // Clock accuracy compensation
+        rx_time += 1; // Extra compensation for timer cycle
 
-#if PHY_USE_FEM_LNA
-        fem_time = rx_time - MYNEWT_VAL(BLE_FEM_LNA_TURN_ON_US);
-        nrf_timer_cc_set(NRF_TIMER0, 2, fem_time);
-        NRF_TIMER0->EVENTS_COMPARE[2] = 0;
-        phy_fem_enable_lna();
-#endif
+        // Set compare for RX enable
+        R32_TMR0_CNT_END = rx_time;
 
-        radio_time = rx_time - BLE_PHY_T_RXENFAST;
-        nrf_timer_cc_set(NRF_TIMER0, 0, radio_time);
-        NRF_TIMER0->EVENTS_COMPARE[0] = 0;
-        phy_ppi_timer0_compare0_to_radio_rxen_enable();
+        // Clear interrupt flag
+        R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+
+        // Start timer
+        R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;
+
+        // TODO: You'll need to handle RX enable in TMR0 ISR when it fires
 
         /* In case TIMER0 did already count past CC[0] and/or CC[2], radio
          * and/or LNA may not be enabled. In any case we won't be stuck since
@@ -1113,13 +976,14 @@ ble_phy_tx_end_isr(void)
             /* Schedule next TX relative to current TX end. TX end timestamp is
              * captured in CC[2].
              */
-            tx_time = NRF_TIMER0->CC[2] + g_ble_phy_data.txtx_time_us;
+            tx_time = g_ble_phy_data.g_tx_end_time + g_ble_phy_data.txtx_time_us;
         } else {
             /* Schedule next TX relative to current TX start. AA timestamp is
              * captured in CC[1], we need to adjust for sync word to get TX
              * start.
              */
-            tx_time = NRF_TIMER0->CC[1] - ble_ll_pdu_syncword_us(tx_phy_mode) +
+            // CH592: Must manually capture AA timestamp
+            tx_time = g_ble_phy_data.g_aa_timestamp - ble_ll_pdu_syncword_us(tx_phy_mode) +
                       g_ble_phy_data.txtx_time_us;
             /* Adjust for delay between EVENT_ADDRESS and actual address TX time */
             /* FIXME assume this is the same as EVENT_END to end, but we should
@@ -1130,39 +994,53 @@ ble_phy_tx_end_isr(void)
         /* Adjust for delay between EVENT_END and actual TX end time */
         tx_time += g_ble_phy_t_txenddelay[tx_phy_mode];
 
-#if PHY_USE_FEM_PA
-        fem_time = tx_time - MYNEWT_VAL(BLE_FEM_PA_TURN_ON_US);
-#endif
-
         /* Adjust for delay between EVENT_READY and actual TX start time */
         tx_time -= g_ble_phy_t_txdelay[g_ble_phy_data.phy_cur_phy_mode];
 
         radio_time = tx_time - BLE_PHY_T_TXENFAST;
-        nrf_timer_cc_set(NRF_TIMER0, 0, radio_time);
-        NRF_TIMER0->EVENTS_COMPARE[0] = 0;
-        phy_ppi_timer0_compare0_to_radio_txen_enable();
+        /* CH592: No hardware timer compare/capture */
+        /* The LL->TMR register counts DOWN, not up like NRF_TIMER0 */
 
-#if PHY_USE_FEM_PA
-        nrf_timer_cc_set(NRF_TIMER0, 2, fem_time);
-        NRF_TIMER0->EVENTS_COMPARE[2] = 0;
-        phy_fem_enable_pa();
-#endif
+        /* Store the desired TX start time (we'll need to calculate delay manually) */
+        uint32_t current_time = os_cputime_get32();
+        int32_t delay_ticks = radio_time - current_time;
 
-        nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CAPTURE3);
-        if (NRF_TIMER0->CC[3] > NRF_TIMER0->CC[0]) {
-            phy_ppi_timer0_compare0_to_radio_txen_disable();
+        if (delay_ticks <= 0) {
+            /* We're already late - cannot schedule TX at this time */
             g_ble_phy_data.phy_transition_late = 1;
+        } else {
+            /* CH592: Cannot hardware-trigger radio TX at precise time */
+            /* Best effort: busy-wait until scheduled time */
+            while (os_cputime_get32() < radio_time) {
+                /* Spin wait */
+            }
+
+            /* Now start TX immediately */
+            /* The Frame_TX() call in your TX routine will handle this */
+            g_ble_phy_data.phy_transition_late = 0;
         }
+
     } else {
         /*
          * XXX: not sure we need to stop the timer here all the time. Or that
          * it should be stopped here.
          */
-        nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
-        NRF_TIMER0->TASKS_SHUTDOWN = 1;
-        phy_ppi_wfr_disable();
-        phy_ppi_timer0_compare0_to_radio_txen_disable();
-        phy_ppi_rtc0_compare0_to_timer0_start_disable();
+        /* CH592: Stop timer and disable radio operations */
+        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop TMR0
+        R32_TMR0_COUNT = 0;                     // Clear counter
+
+        /* Disable radio interrupts */
+        LL->INT_EN = 0;
+
+        /* Stop radio if active */
+        DevSetMode(0);
+
+        /* Clear any pending operations */
+        if (LL->LL0 & 3) {
+            LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+            LL->LL0 |= 0x08;
+        }
+
         assert(transition == BLE_PHY_TRANSITION_NONE);
     }
 }
@@ -1199,27 +1077,36 @@ ble_phy_rx_end_isr(void)
     uint8_t *dptr;
     uint8_t crcok;
     uint32_t tx_time;
-#if PHY_USE_FEM_PA
-    uint32_t fem_time;
-#endif
     uint32_t radio_time;
     uint16_t tifs;
     struct ble_mbuf_hdr *ble_hdr;
     bool is_late;
 
     /* Disable automatic RXEN */
-    phy_ppi_timer0_compare0_to_radio_rxen_disable();
+    /* CH592: Disable automatic RX operations */
+    /* Stop TMR0 if it was scheduling RX */
+    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
+
+    /* Disable radio interrupts for RX */
+    LL->INT_EN &= ~0x0F; // Clear RX-related interrupt enables
+
+    /* Stop radio if in RX mode */
+    if ((LL->CTRL_MOD & 0xFF) == DEVSETMODE_RX) {
+        DevSetMode(0);
+    }
 
     /* Set RSSI and CRC status flag in header */
-    ble_hdr = &g_ble_phy_data.rxhdr;
-    assert(NRF_RADIO->EVENTS_RSSIEND != 0);
-    ble_hdr->rxinfo.rssi = (-1 * NRF_RADIO->RSSISAMPLE);
+    ble_hdr = &g_ble_phy_data.rxhdr;\
+
+    /* CH592: Read RSSI from baseband register */
+    ble_hdr->rxinfo.rssi = ReadRSSI();
 
     dptr = (uint8_t *)&g_ble_phy_rx_buf[0];
     dptr += 3;
 
     /* Count PHY crc errors and valid packets */
-    crcok = NRF_RADIO->EVENTS_CRCOK;
+    /* CH592: Read CRC status from link layer */
+    crcok = (LL->STATUS & 0x01) ? 1 : 0;
     if (!crcok) {
         STATS_INC(ble_phy_stats, rx_crc_err);
     } else {
@@ -1276,27 +1163,22 @@ ble_phy_rx_end_isr(void)
 #endif
 
     /* Schedule TX exactly T_IFS after RX end captured in CC[2] */
-    tx_time = NRF_TIMER0->CC[2] + tifs;
+    tx_time = g_ble_phy_data.g_tx_end_time + tifs;
     /* Adjust for delay between actual RX end time and EVENT_END */
     tx_time -= g_ble_phy_t_rxenddelay[ble_hdr->rxinfo.phy_mode];
 
-#if PHY_USE_FEM_PA
-    fem_time = tx_time - MYNEWT_VAL(BLE_FEM_PA_TURN_ON_US);
-#endif
 
     /* Adjust for delay between EVENT_READY and actual TX start time */
     tx_time -= g_ble_phy_t_txdelay[g_ble_phy_data.phy_cur_phy_mode];
 
     radio_time = tx_time - BLE_PHY_T_TXENFAST;
-    nrf_timer_cc_set(NRF_TIMER0, 0, radio_time);
-    NRF_TIMER0->EVENTS_COMPARE[0] = 0;
-    phy_ppi_timer0_compare0_to_radio_txen_enable();
+    /* CH592: Set up timer to trigger TX at precise time */
+    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
+    R32_TMR0_COUNT = 0;                     // Clear counter
+    R32_TMR0_CNT_END = radio_time;          // Set compare value for TX timing
+    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear interrupt flag
+    R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;    // Start timer
 
-#if PHY_USE_FEM_PA
-    nrf_timer_cc_set(NRF_TIMER0, 2, fem_time);
-    NRF_TIMER0->EVENTS_COMPARE[2] = 0;
-    phy_fem_enable_pa();
-#endif
 
     /* Need to check if TIMER0 did not already count past CC[0] and/or CC[2], so
      * we're not stuck waiting for events in case radio and/or PA was not
@@ -1304,14 +1186,10 @@ ble_phy_rx_end_isr(void)
      *
      * Note: CC[3] is used only for wfr which we do not need here.
      */
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CAPTURE3);
-    is_late = (NRF_TIMER0->CC[3] > radio_time) && !NRF_TIMER0->EVENTS_COMPARE[0];
-#if PHY_USE_FEM_PA
-    is_late = is_late ||
-              ((NRF_TIMER0->CC[3] > fem_time) && !NRF_TIMER0->EVENTS_COMPARE[2]);
-#endif
+    is_late = (R32_TMR0_COUNT > radio_time);
+
     if (is_late) {
-        phy_ppi_timer0_compare0_to_radio_txen_disable();
+        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
         g_ble_phy_data.phy_transition_late = 1;
     }
 
@@ -1341,15 +1219,14 @@ ble_phy_rx_start_isr(void)
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
     int adva_offset;
 #endif
-
+    g_ble_phy_data.g_aa_timestamp = R32_TMR0_COUNT;
     dptr = (uint8_t *)&g_ble_phy_rx_buf[0];
 
-    /* Clear events and clear interrupt */
-    NRF_RADIO->EVENTS_ADDRESS = 0;
-    nrf_radio_int_disable(NRF_RADIO, RADIO_INTENCLR_ADDRESS_Msk);
+    /* CH592: Clear RX start event and interrupt */
+    LL->STATUS &= ~0x02;  // Clear ADDRESS event (bit 1)
+    LL->INT_EN &= ~0x02;  // Disable ADDRESS interrupt
 
-    /* Clear wfr timer channels */
-    phy_ppi_wfr_disable();
+    /* No WFR timer cleanup needed - CH592 has no PPI */
 
     /* Initialize the ble mbuf header */
     ble_hdr = &g_ble_phy_data.rxhdr;
@@ -1371,7 +1248,7 @@ ble_phy_rx_start_isr(void)
      */
     ble_hdr->beg_cputime = g_ble_phy_data.phy_start_cputime;
 
-    usecs = NRF_TIMER0->CC[1];
+    usecs = g_ble_phy_data.g_aa_timestamp;
     pdu_usecs = ble_phy_mode_pdu_start_off(ble_hdr->rxinfo.phy_mode) +
                 g_ble_phy_t_rxaddrdelay[ble_hdr->rxinfo.phy_mode];
     if (usecs < pdu_usecs) {
@@ -1390,23 +1267,19 @@ ble_phy_rx_start_isr(void)
     ble_hdr->beg_cputime += ticks;
     ble_hdr->rem_usecs = usecs;
 
-    /* XXX: I wonder if we always have the 1st byte. If we need to wait for
-     * rx chain delay, it could be 18 usecs from address interrupt. The
-       nrf52 may be able to get here early. */
-    /* Wait to get 1st byte of frame */
+    /* CH592: Wait to get 1st byte of frame */
     while (1) {
-        state = NRF_RADIO->STATE;
-        if (NRF_RADIO->EVENTS_BCMATCH != 0) {
+        state = LL->STATUS;
+
+        /* Check if we have received first byte (bit pattern match) */
+        if (state & 0x04) {  // Assuming bit 2 is BCMATCH equivalent
             break;
         }
 
-        /*
-         * If state is disabled, we should have the BCMATCH. If not,
-         * something is wrong!
-         */
-        if (state == RADIO_STATE_STATE_Disabled) {
-            nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_IRQ_MASK_ALL);
-            NRF_RADIO->SHORTS = 0;
+        /* If RX is disabled/stopped, something went wrong */
+        if ((LL->CTRL_MOD & 0x07) == 0) {  // RX mode bits cleared
+            LL->INT_EN = 0;  // Disable all interrupts
+            LL->STATUS = 0xFFFFFFFF;  // Clear all status bits
             return false;
         }
 
@@ -1414,6 +1287,7 @@ ble_phy_rx_start_isr(void)
         tm_tick();
 #endif
     }
+
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
     /*
@@ -1459,12 +1333,19 @@ ble_phy_rx_start_isr(void)
 static void
 ble_phy_isr(void)
 {
+    uint32_t status;
     uint32_t irq_en;
 
     os_trace_isr_enter();
-
+    // Check if this is a TX ADDRESS event (access address transmitted)
+    if (g_ble_phy_data.phy_state == BLE_PHY_STATE_TX) {
+        // Capture AA timestamp when address is transmitted
+        g_ble_phy_data.g_aa_timestamp = R32_TMR0_COUNT;
+    }
     /* Read irq register to determine which interrupts are enabled */
-    irq_en = NRF_RADIO->INTENSET;
+    irq_en = LL->INT_EN;
+    status = LL->STATUS;
+    LL->STATUS &= irq_en;  // Match iSLER exactly
 
     /*
      * NOTE: order of checking is important! Possible, if things get delayed,
@@ -1473,55 +1354,53 @@ ble_phy_isr(void)
      */
 
     /* We get this if we have started to receive a frame */
-    if ((irq_en & RADIO_INTENCLR_ADDRESS_Msk) && NRF_RADIO->EVENTS_ADDRESS) {
+    /* Check if ADDRESS event occurred (access address received) */
+    // TODO: 0x02 is taken out of ass
+    if ((irq_en & 0x02) && (LL->STATUS & 0x02)) {  // Bit 1 for ADDRESS event
         /*
          * wfr timer is calculated to expire at the exact time we should start
-         * receiving a packet (with 1 usec precision) so it is possible  it will
-         * fire at the same time as EVENT_ADDRESS. If this happens, radio will
-         * be disabled while we are waiting for EVENT_BCCMATCH after 1st byte
+         * receiving a packet (with 1 usec precision) so it is possible it will
+         * fire at the same time as ADDRESS event. If this happens, radio will
+         * be disabled while we are waiting for first byte match after 1st byte
          * of payload is received and ble_phy_rx_start_isr() will fail. In this
          * case we should not clear DISABLED irq mask so it will be handled as
          * regular radio disabled event below. In other case radio was disabled
          * on purpose and there's nothing more to handle so we can clear mask.
          */
         if (ble_phy_rx_start_isr()) {
-            irq_en &= ~RADIO_INTENCLR_DISABLED_Msk;
+            irq_en &= ~0x01;  // Clear DISABLED interrupt mask (bit 0)
         }
     }
+
 
     /* Handle disabled event. This is enabled for both TX and RX. On RX, we
      * need to check phy_rx_started flag to make sure we actually were receiving
      * a PDU, otherwise this is due to wfr.
      */
-    if ((irq_en & RADIO_INTENCLR_DISABLED_Msk) && NRF_RADIO->EVENTS_DISABLED) {
-        BLE_LL_ASSERT(NRF_RADIO->EVENTS_END ||
-                      ((g_ble_phy_data.phy_state == BLE_PHY_STATE_RX) &&
-                       !g_ble_phy_data.phy_rx_started));
-        NRF_RADIO->EVENTS_END = 0;
-        NRF_RADIO->EVENTS_DISABLED = 0;
-        nrf_radio_int_disable(NRF_RADIO, RADIO_INTENCLR_DISABLED_Msk);
+    /* Check if DISABLED event occurred and is enabled */
+    if ((irq_en & 0x01) && (LL->STATUS & 0x01)) {  // Bit 0 for DISABLED event
+        // On CH592, we may not have separate END/DISABLED events
+        // Need to verify the actual status bits available
+
+        /* Clear the status flags */
+        LL->STATUS = 0x01;  // Clear DISABLED status bit
+
+        /* Disable the DISABLED interrupt */
+        LL->INT_EN &= ~0x01;  // Clear bit 0
 
         switch (g_ble_phy_data.phy_state) {
-        case BLE_PHY_STATE_RX:
-#if MYNEWT_VAL(BLE_FEM_LNA)
-            phy_ppi_fem_disable();
-            ble_fem_lna_disable();
-#endif
-            if (g_ble_phy_data.phy_rx_started) {
-                ble_phy_rx_end_isr();
-            } else {
-                ble_ll_wfr_timer_exp(NULL);
-            }
-            break;
-        case BLE_PHY_STATE_TX:
-#if MYNEWT_VAL(BLE_FEM_PA)
-            phy_ppi_fem_disable();
-            ble_fem_pa_disable();
-#endif
-            ble_phy_tx_end_isr();
-            break;
-        default:
-            BLE_LL_ASSERT(0);
+            case BLE_PHY_STATE_RX:
+                if (g_ble_phy_data.phy_rx_started) {
+                    ble_phy_rx_end_isr();
+                } else {
+                    ble_ll_wfr_timer_exp(NULL);
+                }
+                break;
+            case BLE_PHY_STATE_TX:
+                ble_phy_tx_end_isr();
+                break;
+            default:
+                BLE_LL_ASSERT(0);
         }
     }
 
@@ -1531,6 +1410,13 @@ ble_phy_isr(void)
     STATS_INC(ble_phy_stats, phy_isrs);
 
     os_trace_isr_exit();
+    BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
+    DevSetMode(0);
+    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+    LL->LL0 |= 0x08;
+
+    /* Clear NVIC pending */
+    NVIC->IPRR[0] = (1 << (LLE_IRQn & 0x1F));
 }
 
 #if PHY_USE_HEADERMASK_WORKAROUND
@@ -1572,59 +1458,9 @@ ble_phy_init(void)
 #endif
 
     /* Toggle peripheral power to reset (just in case) */
-    nrf_radio_power_set(NRF_RADIO, false);
-    nrf_radio_power_set(NRF_RADIO, true);
-
-#ifdef NRF53_SERIES
-    /* Errata 158: load trim values after toggling power */
-    for (uint32_t index = 0; index < 32ul &&
-         NRF_FICR_NS->TRIMCNF[index].ADDR != 0xFFFFFFFFul; index++) {
-        if (((uint32_t)NRF_FICR_NS->TRIMCNF[index].ADDR & 0xFFFFF000ul) == (volatile uint32_t)NRF_RADIO_NS) {
-            *((volatile uint32_t *)NRF_FICR_NS->TRIMCNF[index].ADDR) = NRF_FICR_NS->TRIMCNF[index].DATA;
-        }
-    }
-
-    *(volatile uint32_t *)(NRF_RADIO_NS_BASE + 0x774) =
-        (*(volatile uint32_t* )(NRF_RADIO_NS_BASE + 0x774) & 0xfffffffe) | 0x01000000;
-#if NRF53_ERRATA_16_ENABLE_WORKAROUND
-    if (nrf53_errata_16()) {
-        /* [16] RADIO: POWER register is not functional */
-        NRF_RADIO_NS->SUBSCRIBE_TXEN = 0;
-        NRF_RADIO_NS->SUBSCRIBE_RXEN = 0;
-        NRF_RADIO_NS->SUBSCRIBE_DISABLE = 0;
-    }
-#endif
-#endif
-
-    /* Disable all interrupts */
-    nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_IRQ_MASK_ALL);
-
-    /* Set configuration registers */
-    NRF_RADIO->MODE = RADIO_MODE_MODE_Ble_1Mbit;
-    NRF_RADIO->PCNF0 = NRF_PCNF0;
-
-    /* XXX: should maxlen be 251 for encryption? */
-    NRF_RADIO->PCNF1 = NRF_MAXLEN |
-                       (RADIO_PCNF1_ENDIAN_Little <<  RADIO_PCNF1_ENDIAN_Pos) |
-                       (NRF_BALEN << RADIO_PCNF1_BALEN_Pos) |
-                       RADIO_PCNF1_WHITEEN_Msk;
-
-    /* Enable radio fast ramp-up */
-    NRF_RADIO->MODECNF0 |= (RADIO_MODECNF0_RU_Fast << RADIO_MODECNF0_RU_Pos) &
-                            RADIO_MODECNF0_RU_Msk;
-
-    /* Set logical address 1 for TX and RX */
-    NRF_RADIO->TXADDRESS  = 0;
-    NRF_RADIO->RXADDRESSES  = (1 << 0);
-
-    /* Configure the CRC registers */
-    NRF_RADIO->CRCCNF = (RADIO_CRCCNF_SKIPADDR_Skip << RADIO_CRCCNF_SKIPADDR_Pos) | RADIO_CRCCNF_LEN_Three;
-
-    /* Configure BLE poly */
-    NRF_RADIO->CRCPOLY = 0x0000065B;
-
-    /* Configure IFS */
-    NRF_RADIO->TIFS = BLE_LL_IFS;
+    // nrf_radio_power_set(NRF_RADIO, false);
+    // nrf_radio_power_set(NRF_RADIO, true);
+    RFCoreInit(LL_TX_POWER_0_DBM);
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     nrf_ccm_int_disable(NRF_CCM, 0xffffffff);
@@ -1650,19 +1486,16 @@ ble_phy_init(void)
 #endif
 
     /* TIMER0 setup for PHY when using RTC */
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
-    NRF_TIMER0->TASKS_SHUTDOWN = 1;
-    NRF_TIMER0->BITMODE = 3;    /* 32-bit timer */
-    NRF_TIMER0->MODE = 0;       /* Timer mode */
-    NRF_TIMER0->PRESCALER = 4;  /* gives us 1 MHz */
-
-    phy_ppi_init();
+    // nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
+    // NRF_TIMER0->TASKS_SHUTDOWN = 1;
+    // NRF_TIMER0->BITMODE = 3;    /* 32-bit timer */
+    // NRF_TIMER0->MODE = 0;       /* Timer mode */
+    // NRF_TIMER0->PRESCALER = 4;  /* gives us 1 MHz */
+    //
+    // phy_ppi_init();
 
 #if PHY_USE_DEBUG
     phy_debug_init();
-#endif
-#if PHY_USE_FEM
-    phy_fem_init();
 #endif
 
     /* Set isr in vector table and enable interrupt */
@@ -1670,7 +1503,7 @@ ble_phy_init(void)
 #ifdef FREERTOS
     NVIC_SetPriority(RADIO_IRQn, 5);
 #else
-    NVIC_SetPriority(RADIO_IRQn, 0);
+    // NVIC_SetPriority(RADIO_IRQn, 0); TODO: not sure if this exists
 #endif
 #endif
 #if MYNEWT
@@ -1714,19 +1547,51 @@ ble_phy_rx(void)
      * can make a shortcut here when checking for idle state.
      */
     nrf_wait_disabled();
-    if ((NRF_RADIO->STATE != RADIO_STATE_STATE_Disabled) &&
-            ((NRF_RADIO->STATE & 0x07) != RADIO_STATE_STATE_RxIdle)) {
+
+    // Capture timestamp when enabling RX
+    g_ble_phy_data.g_rxen_timestamp = R32_TMR0_COUNT;
+
+    /* Check radio state - CH592 approach */
+
+    /* CH592 doesn't have granular state checking like nRF52.
+     * Instead, ensure radio is not in the middle of an operation.
+     * Check if radio is busy by examining status flags.
+     */
+
+    // TODO: we essentially need to replicate without setting address
+    // Frame_RX(accessAddress, channelSet, PHY_1M);
+
+    /* Wait for any ongoing operation to complete */
+    uint32_t timeout = 1000;
+    while ((LL->STATUS & 0x20000) && timeout--) {  // 0x20000 = LL_STATUS_TX
+        /* Radio is transmitting, wait for completion */
+    }
+
+    if (timeout == 0) {
         ble_phy_disable();
         STATS_INC(ble_phy_stats, radio_state_errs);
         return BLE_PHY_ERR_RADIO_STATE;
     }
 
-    /* Make sure all interrupts are disabled */
-    nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_IRQ_MASK_ALL);
+    /* Check if CTRL_MOD indicates radio is active */
+    if ((LL->CTRL_MOD & 0x00FF) != 0) {
+        /* Radio is in active mode (not idle), attempt to stop it */
+        LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+        DevSetMode(0);
 
-    /* Clear events prior to enabling receive */
-    NRF_RADIO->EVENTS_END = 0;
-    NRF_RADIO->EVENTS_DISABLED = 0;
+        /* Wait for mode change */
+        timeout = 1000;
+        while ((LL->CTRL_MOD & 0x00FF) && timeout--);
+
+        if (timeout == 0) {
+            STATS_INC(ble_phy_stats, radio_state_errs);
+            return BLE_PHY_ERR_RADIO_STATE;
+        }
+    }
+    /* Make sure all interrupts are disabled */
+    LL->INT_EN = 0;
+    /* Clear all pending status flags (write-1-to-clear) */
+    LL->STATUS = 0xFFFFFFFF;
 
     /* Setup for rx */
     ble_phy_rx_xcvr_setup();
@@ -1822,17 +1687,13 @@ ble_phy_tx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
     ble_phy_mode_apply(g_ble_phy_data.phy_tx_phy_mode);
 #endif
 
-    /* XXX: This should not be necessary, but paranoia is good! */
-    /* Clear timer0 compare to RXEN since we are transmitting */
-    phy_ppi_timer0_compare0_to_radio_rxen_disable();
-
     if (ble_phy_set_start_time(cputime, rem_usecs, true) != 0) {
         STATS_INC(ble_phy_stats, tx_late);
         ble_phy_disable();
         rc = BLE_PHY_ERR_TX_LATE;
     } else {
         /* Enable PPI to automatically start TXEN */
-        phy_ppi_timer0_compare0_to_radio_txen_enable();
+        // phy_ppi_timer0_compare0_to_radio_txen_enable();
         rc = 0;
     }
 
@@ -1864,10 +1725,6 @@ ble_phy_rx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
     ble_phy_mode_apply(g_ble_phy_data.phy_rx_phy_mode);
 #endif
 
-    /* XXX: This should not be necessary, but paranoia is good! */
-    /* Clear timer0 compare to TXEN since we are transmitting */
-    phy_ppi_timer0_compare0_to_radio_txen_disable();
-
     if (ble_phy_set_start_time(cputime, rem_usecs, false) != 0) {
         STATS_INC(ble_phy_stats, rx_late);
 
@@ -1878,7 +1735,7 @@ ble_phy_rx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
     }
 
     /* Enable PPI to automatically start RXEN */
-    phy_ppi_timer0_compare0_to_radio_rxen_enable();
+    // phy_ppi_timer0_compare0_to_radio_rxen_enable();
 
     /* Start rx */
     rc = ble_phy_rx();
@@ -1917,16 +1774,6 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
      */
     nrf_wait_disabled();
 
-    /*
-     * XXX: Although we may not have to do this here, I clear all the PPI
-     * that should not be used when transmitting. Some of them are only enabled
-     * if encryption and/or privacy is on, but I dont care. Better to be
-     * paranoid, and if you are going to clear one, might as well clear them
-     * all.
-     */
-    phy_ppi_wfr_disable();
-    phy_ppi_radio_bcmatch_to_aar_start_disable();
-    phy_ppi_radio_address_to_ccm_crypt_disable();
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     if (g_ble_phy_data.phy_encrypted) {
@@ -1974,18 +1821,20 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_KSGEN);
     }
 #endif
+    // TODO: need to replicate
+    // Frame_TX(accessAddress, pktptr, payload_len, channelSet, PHY_1M, crcInit);
 
-    NRF_RADIO->PACKETPTR = (uint32_t)pktptr;
+    LL->TXBUF = (uint32_t)pktptr;
 
-    /* Clear the ready, end and disabled events */
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->EVENTS_END = 0;
-    NRF_RADIO->EVENTS_DISABLED = 0;
+    /* Clear all pending status flags (write-1-to-clear) */
+    LL->STATUS = 0xFFFFFFFF;
 
-    /* Enable shortcuts for transmit start/end. */
-    shortcuts = RADIO_SHORTS_END_DISABLE_Msk | RADIO_SHORTS_READY_START_Msk;
-    NRF_RADIO->SHORTS = shortcuts;
-    nrf_radio_int_enable(NRF_RADIO, RADIO_INTENSET_DISABLED_Msk);
+    /* CH592 doesn't have hardware shortcuts like nRF52 */
+    /* The radio state transitions are handled automatically by the hardware */
+    /* READY->START and END->DISABLE happen implicitly */
+
+    /* Enable the interrupt for radio operations complete */
+    LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
 
     /* Set the PHY transition */
     g_ble_phy_data.phy_transition = end_trans;
@@ -1994,8 +1843,8 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     g_ble_phy_data.phy_tx_pyld_len = payload_len;
 
     /* If we already started transmitting, abort it! */
-    state = NRF_RADIO->STATE;
-    if (state != RADIO_STATE_STATE_Tx) {
+    state = LL->STATUS;
+    if (!(state & LL_STATUS_TX)) {
         /* Set phy state to transmitting and count packet statistics */
         g_ble_phy_data.phy_state = BLE_PHY_STATE_TX;
         STATS_INC(ble_phy_stats, tx_good);
@@ -2008,6 +1857,24 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     }
 
     return rc;
+}
+
+// LL power array [-18, -10, -5, -3, 0, 1, 2, 3, 4, 5, 6, 7] dBm
+int phy_txpower_round(int dbm) {
+    /* "Rail" power level if outside supported range */
+    int dbm_levels[] = { -18, -10, -5, -3, 0, 1, 2, 3, 4, 5, 6, 7 };
+    int i;
+    int dbm_rounded = dbm_levels[0];
+    for (i = 0; i < sizeof(dbm_levels) / sizeof(dbm_levels[0]); i++) {
+        if (dbm >= dbm_levels[i]) {
+            dbm_rounded = dbm_levels[i];
+        }
+        else {
+            break;
+        }
+    }
+
+    return dbm_rounded;
 }
 
 /**
@@ -2029,7 +1896,7 @@ ble_phy_tx_power_set(int dbm)
     /* Get actual TX power supported by radio */
     dbm = phy_txpower_round(dbm);
 
-    phy_txpower_set(dbm);
+    DevInit(dbm);
     g_ble_phy_data.phy_txpwr_dbm = dbm;
 
     return 0;
@@ -2062,25 +1929,9 @@ ble_phy_tx_power_round(int dbm)
 static int
 ble_phy_set_access_addr(uint32_t access_addr)
 {
-    NRF_RADIO->BASE0 = (access_addr << 8);
-    NRF_RADIO->PREFIX0 = (NRF_RADIO->PREFIX0 & 0xFFFFFF00) | (access_addr >> 24);
+    BB->ACCESSADDRESS1 = access_addr;
 
     g_ble_phy_data.phy_access_address = access_addr;
-
-#if NRF52_ERRATA_102_ENABLE_WORKAROUND || \
-    NRF52_ERRATA_106_ENABLE_WORKAROUND || \
-    NRF52_ERRATA_107_ENABLE_WORKAROUND
-#ifndef BABBLESIM
-    if (nrf52_errata_102() || nrf52_errata_106() || nrf52_errata_107()) {
-        /* [102] RADIO: PAYLOAD/END events delayed or not triggered after ADDRESS
-         * [106] RADIO: Higher CRC error rates for some access addresses
-         * [107] RADIO: Immediate address match for access addresses containing MSBs 0x00
-         */
-        *(volatile uint32_t *)0x40001774 =
-            ((*(volatile uint32_t *)0x40001774) & 0xfffffffe) | 0x01000000;
-    }
-#endif
-#endif
 
     return 0;
 }
@@ -2124,14 +1975,13 @@ ble_phy_setchan(uint8_t chan, uint32_t access_addr, uint32_t crcinit)
 
     /* Set current access address */
     ble_phy_set_access_addr(access_addr);
-
+    // TODO: this needs massive overhaul
     /* Configure crcinit */
-    NRF_RADIO->CRCINIT = crcinit;
-
+    BB->CRCINIT1 = crcinit;
     /* Set the frequency and the data whitening initial value */
     g_ble_phy_data.phy_chan = chan;
-    NRF_RADIO->FREQUENCY = g_ble_phy_chan_freq[chan];
-    NRF_RADIO->DATAWHITEIV = chan;
+    DevSetChannel(chan); // OR g_ble_phy_chan_freq[chan];
+    // NRF_RADIO->DATAWHITEIV = chan;
 
     return 0;
 }
@@ -2148,9 +1998,8 @@ ble_phy_chan_get(void)
 static void
 ble_phy_stop_usec_timer(void)
 {
-    nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
-    NRF_TIMER0->TASKS_SHUTDOWN = 1;
-    nrf_rtc_event_disable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
+    // TODO: will we be using TMR0 or built in LL->TMR ?
+    LL->TMR = 0;
 }
 
 /**
@@ -2164,11 +2013,21 @@ ble_phy_stop_usec_timer(void)
 static void
 ble_phy_disable_irq_and_ppi(void)
 {
-    nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_IRQ_MASK_ALL);
-    NRF_RADIO->SHORTS = 0;
-    nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
-    phy_ppi_disable();
-    NVIC_ClearPendingIRQ(RADIO_IRQn);
+    /* Disable all LL interrupts */
+    LL->INT_EN = 0;
+
+    /* Stop the radio by clearing mode */
+    DevSetMode(0);
+
+    /* Stop RF module */
+    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+
+    /* Clear pending interrupt */
+    NVIC->IPRR[0] = (1 << (LLE_IRQn & 0x1F));
+
+    /* Clear LL status flags */
+    LL->STATUS = 0xFFFFFFFF;
+
     g_ble_phy_data.phy_state = BLE_PHY_STATE_IDLE;
 }
 
@@ -2179,8 +2038,7 @@ ble_phy_restart_rx(void)
     ble_phy_disable_irq_and_ppi();
 
     ble_phy_set_start_now();
-    /* Enable PPI to automatically start RXEN */
-    phy_ppi_timer0_compare0_to_radio_rxen_enable();
+    /* CH592 doesn't have PPI - RX start is handled directly by Frame_RX() */
 
     ble_phy_rx();
 }
@@ -2206,9 +2064,6 @@ ble_phy_disable(void)
 
     g_ble_phy_data.phy_transition_late = 0;
 
-#if PHY_USE_FEM
-    phy_fem_disable();
-#endif
 }
 
 /* Gets the current access address */
@@ -2247,9 +2102,18 @@ ble_phy_rx_started(void)
 uint8_t
 ble_phy_xcvr_state_get(void)
 {
-    uint32_t state;
-    state = NRF_RADIO->STATE;
-    return (uint8_t)state;
+    uint32_t mode = LL->CTRL_MOD;
+
+    /* Check if radio is in TX mode */
+    if ((mode & 0xFF) == DEVSETMODE_TX) {
+        return 1; /* TX state */
+    }
+    /* Check if radio is in RX mode */
+    else if ((mode & 0xFF) == DEVSETMODE_RX) {
+        return 2; /* RX state */
+    }
+    /* Otherwise idle/disabled */
+    return 0;
 }
 
 /**
@@ -2299,31 +2163,13 @@ void ble_phy_disable_dtm(void)
 void
 ble_phy_rfclk_enable(void)
 {
-#if MYNEWT || defined(RIOT_VERSION) || defined(ARDUINO)
-#ifdef NRF52_SERIES
-    nrf52_clock_hfxo_request();
-#endif
-#ifdef NRF53_SERIES
-    nrf5340_net_clock_hfxo_request();
-#endif
-#else
-    nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_HFCLKSTART);
-#endif
+    // TODO: Probably not needed on CH5xx
 }
 
 void
 ble_phy_rfclk_disable(void)
 {
-#if MYNEWT || defined(RIOT_VERSION) || defined(ARDUINO)
-#ifdef NRF52_SERIES
-    nrf52_clock_hfxo_release();
-#endif
-#ifdef NRF53_SERIES
-    nrf5340_net_clock_hfxo_release();
-#endif
-#else
-    nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_HFCLKSTOP);
-#endif
+    // TODO: Probably not needed on CH5xx
 }
 
 void
@@ -2332,5 +2178,3 @@ ble_phy_tifs_txtx_set(uint16_t usecs, uint8_t anchor)
     g_ble_phy_data.txtx_time_us = usecs;
     g_ble_phy_data.txtx_time_anchor = anchor;
 }
-
-#endif /* defined(ARDUINO_ARCH_NRF5) && (defined(NRF52_SERIES) || defined(NRF53_SERIES)) */

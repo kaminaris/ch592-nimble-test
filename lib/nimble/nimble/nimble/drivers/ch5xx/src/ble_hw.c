@@ -61,11 +61,12 @@ uint8_t g_ch592_num_irks;
 #define ROM_CFG_MAC_ADDR	0x7F018
 
 int ble_hw_get_public_addr(ble_addr_t* addr) {
-	uint32_t addressHigh = *(vu32*)(ROM_CFG_MAC_ADDR + 4);
-	uint32_t addressLow  = *(vu32*)ROM_CFG_MAC_ADDR;
+	volatile uint8_t* rom_addr = (volatile uint8_t*)ROM_CFG_MAC_ADDR;
 
-	memcpy(addr->val, &addressLow, 4);
-	memcpy(&addr->val[4], &addressHigh, 2);
+	// Copy 6 bytes directly
+	for(int i = 0; i < 6; i++) {
+		addr->val[i] = rom_addr[i];
+	}
 
 	addr->val[5] |= 0xc0;
 	addr->type   = BLE_ADDR_PUBLIC;

@@ -133,7 +133,6 @@ void Serialprintf(const char* format, ...) {
 	UART0_SendString((uint8_t*)buf, strlen(buf));
 }
 
-static NimBLEServer* pServer;
 
 class ServerCallbacks: public NimBLEServerCallbacks {
 	void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -248,16 +247,17 @@ class DescriptorCallbacks: public NimBLEDescriptorCallbacks {
 	}
 } dscCallbacks;
 
+static NimBLEServer* pServer;
 void setup() {
-	UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
-	PrintHex(watermark);
+	// UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+	// PrintHex(watermark);
 	PrintHex(0xaBaaaaa0);
 	pinMode(PA8, OUTPUT);
 	PrintHex(0xaBaaaaa1);
 	digitalWrite(PA8, HIGH); // Force known state first
 
 	PrintHex(0xaBaaaaa2);
-	delay(1000);
+	// delay(1000);
 	PrintHex(0xaBaaaaa3);
 	digitalWrite(PA8, LOW);
 	PrintHex(0xaBaaaaa4);
@@ -266,12 +266,12 @@ void setup() {
 	UART0_DefInit();
 
 	PrintHex(0xaBaaaaa5);
-	watermark = uxTaskGetStackHighWaterMark(NULL);
-	PrintHex(watermark);
+	// watermark = uxTaskGetStackHighWaterMark(NULL);
+	// PrintHex(watermark);
 	NimBLEDevice::init("NimBLECH59x");
-	// pServer = NimBLEDevice::createServer();
-	// pServer->setCallbacks(&serverCallbacks);
-	//
+	pServer = NimBLEDevice::createServer();
+	pServer->setCallbacks(&serverCallbacks);
+
 	// NimBLEService* pDeadService               = pServer->createService("DEAD");
 	// NimBLECharacteristic* pBeefCharacteristic = pDeadService->createCharacteristic(
 	// 	"BEEF",
@@ -290,6 +290,7 @@ void setup() {
 	//  */
 	// // pAdvertising->enableScanResponse(true);
 	// pAdvertising->start();
+
 }
 
 void loop() {
@@ -313,11 +314,11 @@ void vApplicationMallocFailedHook(void) {
 	while (1) {
 	} // Halt here
 }
-
-void vApplicationIdleHook(void) {
-	static volatile uint32_t idleCounter = 0;
-	idleCounter++; // Watch this increment
-}
+//
+// void vApplicationIdleHook(void) {
+// 	static volatile uint32_t idleCounter = 0;
+// 	idleCounter++; // Watch this increment
+// }
 
 void abort(void) {
 	Serialprintf("ABORT called!");

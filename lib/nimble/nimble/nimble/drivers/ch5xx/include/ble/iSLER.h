@@ -288,10 +288,13 @@ uint8_t channel_map[] = {1,2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19,20,21,22,2
 #define PHY_S8 8
 
 void DevSetMode(uint16_t mode);
+#ifndef LL_EXTERNAL_BUFFER
 __attribute__((aligned(4))) uint32_t LLE_BUF[0x110];
 #ifdef CH571_CH573
 __attribute__((aligned(4))) uint32_t LLE_BUF2[0x110];
 #endif
+#endif
+
 volatile uint32_t tuneFilter;
 volatile uint32_t tuneFilter2M;
 volatile uint32_t rx_ready;
@@ -316,6 +319,7 @@ void BB_IRQHandler() {
 }
 #endif
 
+#ifndef LL_EXTERNAL_IRQ_HANDLER
 __attribute__((interrupt))
 void LLE_IRQHandler() {
 	// printf("LL\n");
@@ -347,6 +351,7 @@ void LLE_IRQHandler() {
 	rx_ready = 1;
 #endif
 }
+#endif
 
 static inline void RFEND_Reset() {
 #ifdef CH571_CH573
@@ -442,8 +447,10 @@ static inline void DevInit(uint8_t TxPower) {
 	LL->LL21 = 0x14;
 	LL->INT_EN = 0x1f000f;
 #endif
-
+#ifndef LL_EXTERNAL_BUFFER
 	LL->RXBUF = (uint32_t)LLE_BUF;
+#endif
+
 	LL->STATUS = 0xffffffff;
 	RF->RF10 = 0x480;
 
@@ -706,7 +713,8 @@ void RFCoreInit(uint8_t TxPower) {
 	DevInit(TxPower);
 	RegInit();
 	NVIC->IPRIOR[0x15] |= 0x80;
-	NVIC_EnableIRQ(LLE_IRQn);
+	// we do not need to enable the IRQ here, as it is done when starting RX/TX
+	// NVIC_EnableIRQ(LLE_IRQn);
 }
 
 void DevSetChannel(uint8_t channel) {
@@ -722,9 +730,10 @@ __HIGH_CODE
 int8_t ReadRSSI() {
 	return (int8_t)(BB->RSSI >> 0xf);
 }
-
+///////////////////////////////////// ADDED CRCINIT PARAMETER /////////////////////////////////
 __HIGH_CODE
-void Frame_TX(uint32_t access_address, uint8_t adv[], size_t len, uint8_t channel, uint8_t phy_mode) {
+void Frame_TX(uint32_t access_address, uint8_t adv[], size_t len, uint8_t channel, uint8_t phy_mode, uint32_t crcinit
+	) {
 	BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
 	DevSetChannel(channel);
@@ -734,7 +743,7 @@ void Frame_TX(uint32_t access_address, uint8_t adv[], size_t len, uint8_t channe
 	DevSetMode(DEVSETMODE_TX);
 
 	BB->ACCESSADDRESS1 = access_address; // access address
-	BB->CRCINIT1 = 0x555555; // crc init
+	BB->CRCINIT1 = crcinit; // crc init
 #ifdef CH570_CH572
 	BB->ACCESSADDRESS2 = access_address;
 	BB->CRCINIT2 = 0x555555;

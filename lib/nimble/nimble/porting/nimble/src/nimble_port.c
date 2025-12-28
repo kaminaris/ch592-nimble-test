@@ -330,7 +330,7 @@ nimble_port_init(void)
 
 #if NIMBLE_CFG_CONTROLLER
 #ifndef RIOT_VERSION
-    hal_timer_init(0, NULL);
+    hal_timer_init(MYNEWT_VAL_OS_CPUTIME_TIMER_NUM, NULL);
     os_cputime_init(32768);
 #endif
     ble_transport_ll_init();

@@ -31,6 +31,21 @@ void TMR0_TimerInit(uint32_t t) {
 	R8_TMR0_CTRL_MOD = RB_TMR_COUNT_EN;
 }
 
+static inline void NVIC_DisableIRQ(IRQn_Type IRQn) {
+	NVIC->IRER[((uint32_t)(IRQn) >> 5)] = (1 << ((uint32_t)(IRQn) & 0x1F));
+}
+
+static inline void NVIC_EnableIRQ(IRQn_Type IRQn) {
+	NVIC->IENR[((uint32_t)(IRQn) >> 5)] = (1 << ((uint32_t)(IRQn) & 0x1F));
+}
+
+static inline void NVIC_SetPriority(IRQn_Type IRQn, uint8_t priority) {
+	NVIC->IPRIOR[(uint32_t)(IRQn)] = priority;
+}
+
+/* IRQ prototype */
+typedef void (* hal_timer_irq_handler_t)(void);
+
 #define	TMR0_ITCfg(s,f)				((s)?(R8_TMR0_INTER_EN|=f):(R8_TMR0_INTER_EN&=~f))		/* TMR0 corresponding interrupt bit on and off */
 
 
@@ -107,9 +122,18 @@ static uint32_t ch592_read_timer_cntr(struct ch592_hal_timer* bsptimer) {
 }
 
 /**
- * Set hardware timer compare/capture value
+ * nrf timer set ocmp
+ *
+ * Set the OCMP used by the timer to the desired expiration tick
+ *
+ * NOTE: Must be called with interrupts disabled.
+ *
+ * @param timer Pointer to timer.
  */
 static void ch592_timer_set_ocmp(struct ch592_hal_timer* bsptimer, uint32_t expiry) {
+	int32_t delta_t;
+	uint32_t temp;
+	uint32_t cntr;
 	// TODO: Set CH592 timer compare value
 	// Example:
 	// - Disable compare interrupt
@@ -123,7 +147,14 @@ static void ch592_timer_set_ocmp(struct ch592_hal_timer* bsptimer, uint32_t expi
  * Disable timer output compare interrupt
  */
 static void ch592_timer_disable_ocmp(struct ch592_hal_timer* bsptimer) {
-	// TODO: Disable CH592 timer compare interrupt
+	if (bsptimer == NULL) {
+		return;
+	}
+
+	/* Currently only TMR0 support implemented in this HAL file.
+	   Disable the cycle-end (compare) interrupt and clear any pending flag. */
+	TMR0_ITCfg(0, RB_TMR_IE_CYC_END);    /* disable interrupt */
+	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;/* clear pending flag */
 }
 
 #if (MYNEWT_VAL(TIMER_0) || MYNEWT_VAL(TIMER_1) || MYNEWT_VAL(TIMER_2) || MYNEWT_VAL(TIMER_3))
@@ -135,7 +166,8 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	os_sr_t sr;
 	struct hal_timer* timer;
 
-	OS_ENTER_CRITICAL(sr);
+	// TODO: investigate this, it was producing stack corruption
+	// OS_ENTER_CRITICAL(sr);
 	while ((timer = TAILQ_FIRST(&bsptimer->hal_timer_q)) != NULL) {
 		tcntr = ch592_read_timer_cntr(bsptimer);
 		if ((int32_t)(tcntr - timer->expiry) >= 0) {
@@ -156,12 +188,16 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	else {
 		ch592_timer_disable_ocmp(bsptimer);
 	}
-	OS_EXIT_CRITICAL(sr);
+	// OS_EXIT_CRITICAL(sr);
 }
 #endif
 
 /**
- * Generic HAL timer interrupt handler
+ * hal timer irq handler
+ *
+ * Generic HAL timer irq handler.
+ *
+ * @param tmr
  */
 static void hal_timer_irq_handler(struct ch592_hal_timer* bsptimer) {
 	os_trace_isr_enter();
@@ -174,6 +210,7 @@ static void hal_timer_irq_handler(struct ch592_hal_timer* bsptimer) {
 
 	os_trace_isr_exit();
 }
+
 
 /* Timer interrupt handlers - connect these to CH592 interrupt vectors */
 #if MYNEWT_VAL(TIMER_0)
@@ -200,26 +237,91 @@ void ch592_timer3_irq_handler(void) {
 }
 #endif
 
+__HIGH_CODE
+void TMR0_IRQHandler(void) {
+	// Call the generic timer interrupt handler
+	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	ch592_timer0_irq_handler();
+}
+
 /**
- * Initialize HAL timer
+ * hal timer init
+ *
+ * Initialize platform specific timer items
+ *
+ * @param timer_num     Timer number to initialize
+ * @param cfg           Pointer to platform specific configuration
+ *
+ * @return int          0: success; error code otherwise
  */
 int hal_timer_init(int timer_num, void* cfg) {
 	int rc;
+	uint8_t irq_num;
 	struct ch592_hal_timer* bsptimer;
 
 	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
 
+	/* If timer is enabled do not allow init */
 	if (bsptimer->tmr_enabled) {
 		rc = EINVAL;
 		goto err;
 	}
 
+	switch (timer_num) {
+#if MYNEWT_VAL(TIMER_0)
+		case 0:
+			irq_num = TMR0_IRQn;
+			break;
+#endif
+#if MYNEWT_VAL(TIMER_1)
+		case 1:
+			irq_num = TIMER1_IRQn;
+			hwtimer = NRF_TIMER1;
+			irq_isr = nrf52_timer1_irq_handler;
+			break;
+#endif
+#if MYNEWT_VAL(TIMER_2)
+		case 2:
+			irq_num = TIMER2_IRQn;
+			hwtimer = NRF_TIMER2;
+			irq_isr = nrf52_timer2_irq_handler;
+			break;
+#endif
+#if MYNEWT_VAL(TIMER_3)
+		case 3:
+			irq_num = TIMER3_IRQn;
+			hwtimer = NRF_TIMER3;
+			irq_isr = nrf52_timer3_irq_handler;
+			break;
+#endif
+		default:
+			irq_num = 0;
+			break;
+	}
 	// TODO: Initialize CH592 timer hardware
 	// - Map timer_num to CH592 TMR peripheral (TMR0-TMR3)
 	// - Store timer register base address in bsptimer->tmr_reg
 	// - Store IRQ number in bsptimer->tmr_irq_num
 	// - Disable and configure interrupt priority
 	// - Set interrupt vector
+	if (irq_num == 0) {
+		rc = EINVAL;
+		goto err;
+	}
+
+	// bsptimer->tmr_reg = hwtimer;
+	bsptimer->tmr_irq_num = irq_num;
+
+	/* Disable IRQ, set priority and set vector in table */
+	NVIC_DisableIRQ(irq_num);
+#ifndef RIOT_VERSION
+	NVIC_SetPriority(irq_num, 1);
+#endif
+#ifdef MYNEWT
+	NVIC_SetVector(irq_num, (uint32_t)irq_isr);
+#else
+	// NVIC_EnableIRQ(TMR0_IRQn);
+#endif
 
 	return 0;
 
@@ -227,8 +329,33 @@ err:
 	return rc;
 }
 
+uint32_t GetSysClock2(void) {
+	uint16_t rev;
+
+	rev = R32_CLK_SYS_CFG & 0xff;
+	if ((rev & 0x40) == (0 << 6)) {
+		// 32M���з�Ƶ
+		return (32000000 / (rev & 0x1f));
+	}
+	else if ((rev & RB_CLK_SYS_MOD) == (1 << 6)) {
+		// PLL���з�Ƶ
+		return (480000000 / (rev & 0x1f));
+	}
+	else {
+		// 32K����Ƶ
+		return (32000);
+	}
+}
+
 /**
- * Configure timer frequency and start it
+ * hal timer config
+ *
+ * Configure a timer to run at the desired frequency. This starts the timer.
+ *
+ * @param timer_num
+ * @param freq_hz
+ *
+ * @return int
  */
 int hal_timer_config(int timer_num, uint32_t freq_hz) {
 	int rc;
@@ -237,7 +364,7 @@ int hal_timer_config(int timer_num, uint32_t freq_hz) {
 
 	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
 
-	if (bsptimer->tmr_enabled || (freq_hz == 0) || (bsptimer->tmr_reg == NULL)) {
+	if (bsptimer->tmr_enabled || (freq_hz == 0)) {
 		rc = EINVAL;
 		goto err;
 	}
@@ -247,12 +374,13 @@ int hal_timer_config(int timer_num, uint32_t freq_hz) {
 
 	OS_ENTER_CRITICAL(sr);
 
-	// TODO: Configure CH592 timer
-	// - Stop timer
-	// - Set prescaler/clock source for desired frequency (32768 Hz for BLE)
-	// - Clear counter
-	// - Start timer
-	// - Enable interrupts
+	uint32_t sys_clk = GetSysClock2(); // Get system clock frequency
+	uint32_t cnt_end = sys_clk / freq_hz; // Calculate counter end value
+	TMR0_TimerInit(cnt_end);
+	TMR0_ITCfg(1, RB_TMR_IE_CYC_END); // Enable cycle end interrupt
+	PFIC_EnableIRQ(TMR0_IRQn); // Enable in NVIC
+	// This may not be good idea? or ISR handling is bad?
+	NVIC_EnableIRQ(TMR0_IRQn);
 
 	OS_EXIT_CRITICAL(sr);
 
@@ -263,7 +391,13 @@ err:
 }
 
 /**
- * De-initialize HAL timer
+ * hal timer deinit
+ *
+ * De-initialize a HW timer.
+ *
+ * @param timer_num
+ *
+ * @return int
  */
 int hal_timer_deinit(int timer_num) {
 	int rc;
@@ -275,7 +409,13 @@ int hal_timer_deinit(int timer_num) {
 
 	OS_ENTER_CRITICAL(sr);
 
-	// TODO: Stop and disable CH592 timer
+	/* Disable NVIC for this timer */
+	NVIC_DisableIRQ(bsptimer->tmr_irq_num);
+	if (bsptimer->tmr_irq_num == TMR0_IRQn) {
+		TMR0_ITCfg(0, RB_TMR_IE_CYC_END);    /* disable compare/cycle-end interrupt */
+		R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;/* clear pending flag */
+		R8_TMR0_CTRL_MOD = RB_TMR_ALL_CLEAR; /* stop and clear timer */
+	}
 
 	bsptimer->tmr_enabled = 0;
 	bsptimer->tmr_reg     = NULL;
@@ -287,7 +427,13 @@ err:
 }
 
 /**
- * Get timer resolution in nanoseconds
+ * hal timer get resolution
+ *
+ * Get the resolution of the timer. This is the timer period, in nanoseconds
+ *
+ * @param timer_num
+ *
+ * @return uint32_t The
  */
 uint32_t hal_timer_get_resolution(int timer_num) {
 	int rc;
@@ -305,7 +451,13 @@ err:
 }
 
 /**
- * Read current timer counter value
+ * hal timer read
+ *
+ * Returns the timer counter. NOTE: if the timer is a 16-bit timer, only
+ * the lower 16 bits are valid. If the timer is a 64-bit timer, only the
+ * low 32-bits are returned.
+ *
+ * @return uint32_t The timer counter register.
  */
 uint32_t hal_timer_read(int timer_num) {
 	int rc;
@@ -318,6 +470,7 @@ uint32_t hal_timer_read(int timer_num) {
 
 	return tcntr;
 
+    /* Assert here since there is no invalid return code */
 err:
 	assert(0);
 	rc = 0;
@@ -325,7 +478,14 @@ err:
 }
 
 /**
+ * hal timer delay
+ *
  * Blocking delay for n ticks
+ *
+ * @param timer_num
+ * @param ticks
+ *
+ * @return int 0 on success; error code otherwise.
  */
 int hal_timer_delay(int timer_num, uint32_t ticks) {
 	uint32_t until;
@@ -339,7 +499,13 @@ int hal_timer_delay(int timer_num, uint32_t ticks) {
 }
 
 /**
- * Set timer callback
+ *
+ * Initialize the HAL timer structure with the callback and the callback
+ * argument. Also initializes the HW specific timer pointer.
+ *
+ * @param cb_func
+ *
+ * @return int
  */
 int hal_timer_set_cb(
 	int timer_num,
@@ -377,9 +543,6 @@ int hal_timer_start(struct hal_timer* timer, uint32_t ticks) {
 	return rc;
 }
 
-/**
- * Start timer at absolute tick value
- */
 int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
 	os_sr_t sr;
 	struct hal_timer* entry;
@@ -420,7 +583,13 @@ int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
 }
 
 /**
- * Stop a timer
+ * hal timer stop
+ *
+ * Stop a timer.
+ *
+ * @param timer
+ *
+ * @return int
  */
 int hal_timer_stop(struct hal_timer* timer) {
 	os_sr_t sr;
@@ -439,6 +608,7 @@ int hal_timer_stop(struct hal_timer* timer) {
 	if (timer->link.tqe_prev != NULL) {
 		reset_ocmp = 0;
 		if (timer == TAILQ_FIRST(&bsptimer->hal_timer_q)) {
+            /* If first on queue, we will need to reset OCMP */
 			entry      = TAILQ_NEXT(timer, link);
 			reset_ocmp = 1;
 		}

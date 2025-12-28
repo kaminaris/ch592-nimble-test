@@ -29,45 +29,59 @@
 // #include "CH59x_common.h"
 
 static void* radio_isr_addr;
+#ifdef HAS_HW_RNG
 static void* rng_isr_addr;
+#endif
 static void* rtc_isr_addr; // CH592 uses RTC for BLE timing
+
+#ifndef RADIO_IRQn
+#define RADIO_IRQn         LLE_IRQn
+#endif
 
 static inline bool in_isr(void) {
 	return (PFIC->GISR & (1U << 8)) != 0;
 }
 
-// CH592 interrupt handlers
-void RADIO_IRQHandler(void) {
-	// TODO: Add CH592 radio interrupt handling
-	((void (*)(void))radio_isr_addr)();
+// TODO: remove this, it should be somewhere higher up
+static inline void NVIC_SetPriority(IRQn_Type IRQn, uint8_t priority) {
+	NVIC->IPRIOR[(uint32_t)(IRQn)] = priority;
 }
 
+// CH592 interrupt handlers
+__attribute__((interrupt))
+void LLE_IRQHandler() {
+// void RADIO_IRQHandler(void) {
+	// TODO: check why this interrupt goes before we start
+	((void (*)(void))radio_isr_addr)();
+}
+#ifdef HAS_HW_RNG
+__attribute__((interrupt))
 void RNG_IRQHandler(void) {
 	// TODO: Add CH592 RNG interrupt handling
 	((void (*)(void))rng_isr_addr)();
 }
-
+#endif
+__attribute__((interrupt))
 void RTC_IRQHandler(void) {
 	// TODO: Add CH592 RTC interrupt handling
 	((void (*)(void))rtc_isr_addr)();
 }
 
+
 /* This is called by NimBLE radio driver to set interrupt handlers */
 void npl_freertos_hw_set_isr(int irqn, void (* addr)(void)) {
-	// TODO: Map CH592 IRQ numbers - check CH59x_common.h or startup file
 	switch (irqn) {
-		case 0: // TODO: Replace with CH592_RADIO_IRQn or BLE_IRQn
+		case RADIO_IRQn:
 			radio_isr_addr = addr;
-			// TODO: PFIC_EnableIRQ(RADIO_IRQn);
-			// TODO: PFIC_SetPriority(RADIO_IRQn, priority);
 			break;
-		case 1: // TODO: Replace with CH592_RNG_IRQn
+#ifdef HAS_HW_RNG
+		case 1:
+			// TODO: CH592 does not have hardware RNG but other CH chips can
 			rng_isr_addr = addr;
-			// TODO: PFIC_EnableIRQ(RNG_IRQn);
 			break;
-		case 2: // TODO: Replace with CH592_RTC_IRQn
+#endif
+		case RTC_IRQn:
 			rtc_isr_addr = addr;
-			// TODO: PFIC_EnableIRQ(RTC_IRQn);
 			break;
 	}
 }
