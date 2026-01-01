@@ -48,20 +48,23 @@ static inline void NVIC_SetPriority(IRQn_Type IRQn, uint8_t priority) {
 }
 
 // CH592 interrupt handlers
-__attribute__((interrupt))
+__INTERRUPT
 void LLE_IRQHandler() {
 // void RADIO_IRQHandler(void) {
 	// TODO: check why this interrupt goes before we start
 	((void (*)(void))radio_isr_addr)();
+	PFIC->IPRR[0] = (1 << 8);
+	// TODO: is this needed?
+	asm volatile("fence" ::: "memory");
 }
 #ifdef HAS_HW_RNG
-__attribute__((interrupt))
+__HIGH_CODE
 void RNG_IRQHandler(void) {
 	// TODO: Add CH592 RNG interrupt handling
 	((void (*)(void))rng_isr_addr)();
 }
 #endif
-__attribute__((interrupt))
+__HIGH_CODE
 void RTC_IRQHandler(void) {
 	// TODO: Add CH592 RTC interrupt handling
 	((void (*)(void))rtc_isr_addr)();

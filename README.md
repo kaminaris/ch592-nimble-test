@@ -25,6 +25,18 @@ Those files were heavily modified to work with CH59x:
 
 ## Debugging
 
+minichlink does work but requires new version from discord.
+
+1. Clean -> debug build (will fail, ignore errors)
+2. Flash using minichlink
+   `~/.platformio/packages/tool-minichlink/minichlink.exe -w /a/Projects/Electronic/CH59/CH592FNimbleTest/.pio/build/ch592f/firmware.bin 0x0 -b`
+3. open up another terminal start minichlink gdb server
+   `./minichlink.exe -b -a -G`
+4. Hit debug again, it should connect to gdb server now.
+5. Restart MCU FROM gdb (in clion its R button) and you should be good to go.
+
+**OLD INFO** - 
+
 minichlink does not work, has bug when writing flash and that bricks flash.
 Have to use `wch-link` for now which is extremely janky.
 
@@ -57,9 +69,17 @@ echo "Ready for Remote Connections"
 
 ## Commands
 
+### debug verbose
+
+`pio debug  --interface=gdb -v`
+
 ### read flash
 
 `~/.platformio/packages/tool-minichlink/minichlink.exe -r test.bin flash $(ls -l .pio/build/ch592f/firmware.bin | awk '{print $5}')`
+
+### write flash
+
+`~/.platformio/packages/tool-minichlink/minichlink.exe -w /a/Projects/Electronic/CH59/CH592FNimbleTest/.pio/build/ch592f/firmware.bin 0x0 -b`
 
 ### openocd
 

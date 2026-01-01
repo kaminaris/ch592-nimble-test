@@ -246,7 +246,15 @@ class DescriptorCallbacks: public NimBLEDescriptorCallbacks {
 		Serialprintf("%s Descriptor read\n", pDescriptor->getUUID().toString().c_str());
 	}
 } dscCallbacks;
-
+static void format_mac_upper(const uint8_t* mac, char* out /* size >= 18 */) {
+	static const char hex[] = "0123456789ABCDEF";
+	for (int i = 0; i < 6; ++i) {
+		uint8_t b = mac[5 - i]; // keep original ordering mac[5] .. mac[0]
+		out[i * 3 + 0] = hex[(b >> 4) & 0x0F];
+		out[i * 3 + 1] = hex[b & 0x0F];
+		out[i * 3 + 2] = (i < 5) ? ':' : '\0';
+	}
+}
 static NimBLEServer* pServer;
 void setup() {
 	// UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
@@ -272,24 +280,30 @@ void setup() {
 	pServer = NimBLEDevice::createServer();
 	pServer->setCallbacks(&serverCallbacks);
 
-	// NimBLEService* pDeadService               = pServer->createService("DEAD");
-	// NimBLECharacteristic* pBeefCharacteristic = pDeadService->createCharacteristic(
-	// 	"BEEF",
-	// 	READ | WRITE
-	// );
-	//
-	// pBeefCharacteristic->setValue("Burger");
-	// pBeefCharacteristic->setCallbacks(&chrCallbacks);
-	//
-	// NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-	// pAdvertising->setName("NimBLEServ");
-	// pAdvertising->addServiceUUID(pDeadService->getUUID());
-	// /**
-	//  *  If your device is battery powered you may consider setting scan response
-	//  *  to false as it will extend battery life at the expense of less data sent.
-	//  */
-	// // pAdvertising->enableScanResponse(true);
-	// pAdvertising->start();
+	NimBLEService* pDeadService               = pServer->createService("DEAD");
+	NimBLECharacteristic* pBeefCharacteristic = pDeadService->createCharacteristic(
+		"BEEF",
+		READ | WRITE
+	);
+
+	pBeefCharacteristic->setValue("Burger");
+	pBeefCharacteristic->setCallbacks(&chrCallbacks);
+
+	NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+	pAdvertising->setName("NimBLEServ");
+	pAdvertising->addServiceUUID(pDeadService->getUUID());
+	/**
+	 *  If your device is battery powered you may consider setting scan response
+	 *  to false as it will extend battery life at the expense of less data sent.
+	 */
+	// pAdvertising->enableScanResponse(true);
+	pAdvertising->start();
+	// print ble mac address
+	auto mac = NimBLEDevice::getAddress().getVal();
+	char macstr[18];
+	format_mac_upper(mac, macstr);
+	Serialprintf("BLE MAC: %s\n", macstr);
+
 
 }
 
@@ -299,7 +313,7 @@ void loop() {
 	ledState = (ledState == LOW) ? HIGH : LOW;
 	digitalWrite(PA8, ledState);
 	Serialprintf("Hello %d\n", loopCounter);
-	delay(500);
+	delay(1000);
 }
 
 extern "C" {

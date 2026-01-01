@@ -1345,7 +1345,16 @@ ble_phy_isr(void)
     /* Read irq register to determine which interrupts are enabled */
     irq_en = LL->INT_EN;
     status = LL->STATUS;
-    LL->STATUS &= irq_en;  // Match iSLER exactly
+    {
+        LL->STATUS &= LL->INT_EN;
+        BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
+    }
+    DevSetMode(0);
+    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+    LL->LL0 |= 0x08;
+
+    /* Clear NVIC pending */
+    // NVIC->IPRR[0] = (1 << (LLE_IRQn & 0x1F));
 
     /*
      * NOTE: order of checking is important! Possible, if things get delayed,
@@ -1410,13 +1419,7 @@ ble_phy_isr(void)
     STATS_INC(ble_phy_stats, phy_isrs);
 
     os_trace_isr_exit();
-    BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
-    DevSetMode(0);
-    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-    LL->LL0 |= 0x08;
 
-    /* Clear NVIC pending */
-    NVIC->IPRR[0] = (1 << (LLE_IRQn & 0x1F));
 }
 
 #if PHY_USE_HEADERMASK_WORKAROUND
@@ -1823,11 +1826,19 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 #endif
     // TODO: need to replicate
     // Frame_TX(accessAddress, pktptr, payload_len, channelSet, PHY_1M, crcInit);
+    BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
+    // Uncomment to disable whitening to debug RF.
+    //BB->CTRL_CFG |= (1<<6);
+    DevSetMode(DEVSETMODE_TX);
     LL->TXBUF = (uint32_t)pktptr;
 
+    // default 1M for now TODO: may not be needed?
+    BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_2M: CTRL_CFG_PHY_1M;
+
+
     /* Clear all pending status flags (write-1-to-clear) */
-    LL->STATUS = 0xFFFFFFFF;
+    LL->STATUS = LL_STATUS_TX;
 
     /* CH592 doesn't have hardware shortcuts like nRF52 */
     /* The radio state transitions are handled automatically by the hardware */
