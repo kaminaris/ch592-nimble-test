@@ -69,21 +69,45 @@ static void mini_itoa(int val, char* buf, int base) {
 }
 
 int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
-	char* p   = buf;
+	char* p = buf;
 	char* end = buf + size - 1;
 
 	while (*fmt && p < end) {
 		if (*fmt == '%') {
 			fmt++;
+			int width = 0;
+			char pad = ' ';
+
+			// Handle zero padding
+			if (*fmt == '0') {
+				pad = '0';
+				fmt++;
+			}
+
+			// Parse width
+			while (*fmt >= '0' && *fmt <= '9') {
+				width = width * 10 + (*fmt - '0');
+				fmt++;
+			}
+
+			// Skip PRIx16/PRIx32 macros (they expand to "x")
+			if (*fmt == 'P' && fmt[1] == 'R' && fmt[2] == 'I') {
+				fmt += 3; // Skip "PRI"
+			}
+
 			if (*fmt == 'd') {
 				char tmp[16];
 				mini_itoa(va_arg(args, int), tmp, 10);
+				int len = strlen(tmp);
+				while (width > len && p < end) { *p++ = pad; width--; }
 				char* s = tmp;
 				while (*s && p < end) *p++ = *s++;
 			}
 			else if (*fmt == 'x') {
 				char tmp[16];
 				mini_itoa(va_arg(args, int), tmp, 16);
+				int len = strlen(tmp);
+				while (width > len && p < end) { *p++ = pad; width--; }
 				char* s = tmp;
 				while (*s && p < end) *p++ = *s++;
 			}
@@ -104,26 +128,7 @@ int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
 	return p - buf;
 }
 
-extern "C" {
-int __wrap_printf(const char* f, ...) { return 0; }
-int __wrap_vprintf(const char* f, va_list a) { return 0; }
-int __wrap_sprintf(char* s, const char* f, ...) { return 0; }
-int __wrap_vsprintf(char* s, const char* f, va_list a) { return 0; }
-int __wrap_asprintf(char** s, const char* f, ...) { return 0; }
-int __wrap_vasprintf(char** s, const char* f, va_list a) { return 0; }
 
-int __wrap_snprintf(char* s, size_t n, const char* f, ...) {
-	va_list args;
-	va_start(args, f);
-	int ret = mini_vsnprintf(s, n, f, args);
-	va_end(args);
-	return ret;
-}
-
-int __wrap_vsnprintf(char* s, size_t n, const char* f, va_list a) {
-	return mini_vsnprintf(s, n, f, a);
-}
-}
 
 void Serialprintf(const char* format, ...) {
 	va_list args;
@@ -133,6 +138,44 @@ void Serialprintf(const char* format, ...) {
 	UART0_SendString((uint8_t*)buf, strlen(buf));
 }
 
+extern "C" {
+	int __wrap_printf(const char* f, ...) {
+		va_list args;
+		va_start(args, f);
+		mini_vsnprintf(buf, sizeof(buf), f, args);
+		va_end(args);
+		UART0_SendString((uint8_t*)buf, strlen(buf));
+		return strlen(buf);
+	}
+
+	int __wrap_vprintf(const char* f, va_list a) {
+		int ret = mini_vsnprintf(buf, sizeof(buf), f, a);
+		UART0_SendString((uint8_t*)buf, strlen(buf));
+		return ret;
+	}
+	int __wrap_sprintf(char* s, const char* f, ...) {
+		va_list args;
+		va_start(args, f);
+		int ret = mini_vsnprintf(s, SIZE_MAX, f, args);
+		va_end(args);
+		return ret;
+	}
+	int __wrap_vsprintf(char* s, const char* f, va_list a) { return 0; }
+	int __wrap_asprintf(char** s, const char* f, ...) { return 0; }
+	int __wrap_vasprintf(char** s, const char* f, va_list a) { return 0; }
+
+	int __wrap_snprintf(char* s, size_t n, const char* f, ...) {
+		va_list args;
+		va_start(args, f);
+		int ret = mini_vsnprintf(s, n, f, args);
+		va_end(args);
+		return ret;
+	}
+
+	int __wrap_vsnprintf(char* s, size_t n, const char* f, va_list a) {
+		return mini_vsnprintf(s, n, f, a);
+	}
+}
 
 class ServerCallbacks: public NimBLEServerCallbacks {
 	void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -288,6 +331,7 @@ void setup() {
 
 	pBeefCharacteristic->setValue("Burger");
 	pBeefCharacteristic->setCallbacks(&chrCallbacks);
+	pDeadService->start();
 
 	NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
 	pAdvertising->setName("NimBLEServ");
@@ -313,7 +357,7 @@ void loop() {
 	ledState = (ledState == LOW) ? HIGH : LOW;
 	digitalWrite(PA8, ledState);
 	Serialprintf("Hello %d\n", loopCounter);
-	delay(1000);
+	delay(5000);
 }
 
 extern "C" {
