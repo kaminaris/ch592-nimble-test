@@ -111,14 +111,34 @@ static const struct ch592_hal_timer* ch592_hal_timers[CH592_HAL_TIMER_MAX] = {
         goto err;                               \
     }
 
+#ifndef CH592_TIMER_MASK
+#define CH592_TIMER_MASK  (0x3FFFFFFu)  // 26-bit mask, not 24-bit
+#endif
+
 /**
  * Read hardware timer counter
  */
 static uint32_t ch592_read_timer_cntr(struct ch592_hal_timer* bsptimer) {
-	uint32_t tcntr = 0;
-	tcntr          = TMR0_GetCurrentCount();
+	uint32_t tcntr;
+	uint32_t prev_low;
 
-	return tcntr;
+	// Read raw 26-bit hardware counter
+	tcntr = TMR0_GetCurrentCount() & CH592_TIMER_MASK;
+	bsptimer->tmr_cntr = tcntr; // TODO: we probably dont need 32bit anyways
+
+	// Extract previous low 26 bits from software counter
+	// prev_low = bsptimer->tmr_cntr & CH592_TIMER_MASK;
+	//
+	// // Detect wraparound by comparing current vs previous hardware value
+	// if (tcntr < prev_low) {
+	// 	// Wraparound: increment high bits, keep new low bits
+	// 	bsptimer->tmr_cntr = tcntr + (bsptimer->tmr_cntr & ~CH592_TIMER_MASK) + (CH592_TIMER_MASK + 1);
+	// } else {
+	// 	// No wraparound: keep high bits, update low bits
+	// 	bsptimer->tmr_cntr = tcntr + (bsptimer->tmr_cntr & ~CH592_TIMER_MASK);
+	// }
+
+	return bsptimer->tmr_cntr;
 }
 
 /**
@@ -131,17 +151,25 @@ static uint32_t ch592_read_timer_cntr(struct ch592_hal_timer* bsptimer) {
  * @param timer Pointer to timer.
  */
 static void ch592_timer_set_ocmp(struct ch592_hal_timer* bsptimer, uint32_t expiry) {
-	int32_t delta_t;
-	uint32_t temp;
-	uint32_t cntr;
-	// TODO: Set CH592 timer compare value
-	// Example:
-	// - Disable compare interrupt
-	// - Set compare register to expiry value
-	// - Clear interrupt flags
-	// - Enable compare interrupt
-	// - Check if we already passed the expiry (force interrupt)
+	// uint32_t current = ch592_read_timer_cntr(bsptimer);
+	//
+	// // If already expired, fire ISR immediately
+	// if ((int32_t)(current - expiry) >= 0) {
+	// 	// Trigger interrupt manually
+	// 	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	// 	TMR0_ITCfg(1, RB_TMR_IE_CYC_END);
+	// 	return;
+	// }
+
+	TMR0_ITCfg(0, RB_TMR_IE_CYC_END);
+
+	// Write only the lower 24 bits of the absolute expiry
+	R32_TMR0_CNT_END = expiry & CH592_TIMER_MASK;
+
+	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	TMR0_ITCfg(1, RB_TMR_IE_CYC_END);
 }
+
 
 /**
  * Disable timer output compare interrupt
@@ -161,19 +189,29 @@ static void ch592_timer_disable_ocmp(struct ch592_hal_timer* bsptimer) {
 /**
  * Check timer queue and process expired timers
  */
+volatile uint32_t hal_timer_chk_queue_hits = 0;
+volatile uint32_t hal_timer_chk_queue_execs = 0;
+volatile uint32_t halTimerLastExpiry = 0;
+volatile uint32_t halTimerCheckCnt = 0;
+
 static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	uint32_t tcntr;
 	os_sr_t sr;
 	struct hal_timer* timer;
-
+	hal_timer_chk_queue_hits++;
 	// TODO: investigate this, it was producing stack corruption
-	// OS_ENTER_CRITICAL(sr);
+	OS_ENTER_CRITICAL(sr);
 	while ((timer = TAILQ_FIRST(&bsptimer->hal_timer_q)) != NULL) {
 		tcntr = ch592_read_timer_cntr(bsptimer);
+		halTimerLastExpiry = timer->expiry;
+		halTimerCheckCnt = tcntr;
 		if ((int32_t)(tcntr - timer->expiry) >= 0) {
 			TAILQ_REMOVE(&bsptimer->hal_timer_q, timer, link);
 			timer->link.tqe_prev = NULL;
 			timer->cb_func(timer->cb_arg);
+			hal_timer_chk_queue_execs++;
+
+			tcntr = ch592_read_timer_cntr(bsptimer);
 		}
 		else {
 			break;
@@ -188,7 +226,7 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	else {
 		ch592_timer_disable_ocmp(bsptimer);
 	}
-	// OS_EXIT_CRITICAL(sr);
+	OS_EXIT_CRITICAL(sr);
 }
 #endif
 
@@ -238,10 +276,14 @@ void ch592_timer3_irq_handler(void) {
 #endif
 
 __HIGH_CODE
+// __INTERRUPT
+// void TMR0_IRQHandler(void) __attribute__((interrupt));
 void TMR0_IRQHandler(void) {
 	// Call the generic timer interrupt handler
-	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	ch592_timer0_irq_handler();
+	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 /**
@@ -298,12 +340,7 @@ int hal_timer_init(int timer_num, void* cfg) {
 			irq_num = 0;
 			break;
 	}
-	// TODO: Initialize CH592 timer hardware
-	// - Map timer_num to CH592 TMR peripheral (TMR0-TMR3)
-	// - Store timer register base address in bsptimer->tmr_reg
-	// - Store IRQ number in bsptimer->tmr_irq_num
-	// - Disable and configure interrupt priority
-	// - Set interrupt vector
+
 	if (irq_num == 0) {
 		rc = EINVAL;
 		goto err;
@@ -311,7 +348,10 @@ int hal_timer_init(int timer_num, void* cfg) {
 
 	// bsptimer->tmr_reg = hwtimer;
 	bsptimer->tmr_irq_num = irq_num;
+	bsptimer->timer_isrs = 0;
+	bsptimer->tmr_cntr = 0;  // Initialize software counter to 0
 
+	TAILQ_INIT(&bsptimer->hal_timer_q);
 	/* Disable IRQ, set priority and set vector in table */
 	NVIC_DisableIRQ(irq_num);
 #ifndef RIOT_VERSION
@@ -380,8 +420,8 @@ int hal_timer_config(int timer_num, uint32_t freq_hz) {
 	TMR0_ITCfg(1, RB_TMR_IE_CYC_END); // Enable cycle end interrupt
 	PFIC_EnableIRQ(TMR0_IRQn); // Enable in NVIC
 	// This may not be good idea? or ISR handling is bad?
-	NVIC_EnableIRQ(TMR0_IRQn);
-
+	//NVIC_EnableIRQ(TMR0_IRQn);
+	// bsptimer->tmr_cntr = TMR0_GetCurrentCount() & CH592_TIMER_MASK;
 	OS_EXIT_CRITICAL(sr);
 
 	return 0;
@@ -543,6 +583,7 @@ int hal_timer_start(struct hal_timer* timer, uint32_t ticks) {
 	return rc;
 }
 
+volatile uint32_t hal_timer_queue_inserts = 0;
 int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
 	os_sr_t sr;
 	struct hal_timer* entry;
@@ -559,16 +600,19 @@ int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
 
 	if (TAILQ_EMPTY(&bsptimer->hal_timer_q)) {
 		TAILQ_INSERT_HEAD(&bsptimer->hal_timer_q, timer, link);
+		hal_timer_queue_inserts++;
 	}
 	else {
 		TAILQ_FOREACH(entry, &bsptimer->hal_timer_q, link) {
 			if ((int32_t)(timer->expiry - entry->expiry) < 0) {
 				TAILQ_INSERT_BEFORE(entry, timer, link);
+				hal_timer_queue_inserts++;
 				break;
 			}
 		}
 		if (!entry) {
 			TAILQ_INSERT_TAIL(&bsptimer->hal_timer_q, timer, link);
+			hal_timer_queue_inserts++;
 		}
 	}
 

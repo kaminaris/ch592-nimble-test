@@ -9,6 +9,7 @@
 volatile uint32_t loopCounter = 0;
 auto ledState                 = LOW;
 
+extern "C" {
 void UART0_SendString(uint8_t* buf, uint16_t l) {
 	uint16_t len = l;
 
@@ -53,6 +54,7 @@ void UART0_BaudRateCfg(uint32_t baudrate) {
 	x            = (x + 5) / 10;
 	R16_UART0_DL = (uint16_t)x;
 }
+}
 
 char buf[64];
 
@@ -69,14 +71,14 @@ static void mini_itoa(int val, char* buf, int base) {
 }
 
 int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
-	char* p = buf;
+	char* p   = buf;
 	char* end = buf + size - 1;
 
 	while (*fmt && p < end) {
 		if (*fmt == '%') {
 			fmt++;
 			int width = 0;
-			char pad = ' ';
+			char pad  = ' ';
 
 			// Handle zero padding
 			if (*fmt == '0') {
@@ -99,7 +101,10 @@ int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
 				char tmp[16];
 				mini_itoa(va_arg(args, int), tmp, 10);
 				int len = strlen(tmp);
-				while (width > len && p < end) { *p++ = pad; width--; }
+				while (width > len && p < end) {
+					*p++ = pad;
+					width--;
+				}
 				char* s = tmp;
 				while (*s && p < end) *p++ = *s++;
 			}
@@ -107,7 +112,10 @@ int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
 				char tmp[16];
 				mini_itoa(va_arg(args, int), tmp, 16);
 				int len = strlen(tmp);
-				while (width > len && p < end) { *p++ = pad; width--; }
+				while (width > len && p < end) {
+					*p++ = pad;
+					width--;
+				}
 				char* s = tmp;
 				while (*s && p < end) *p++ = *s++;
 			}
@@ -139,42 +147,44 @@ void Serialprintf(const char* format, ...) {
 }
 
 extern "C" {
-	int __wrap_printf(const char* f, ...) {
-		va_list args;
-		va_start(args, f);
-		mini_vsnprintf(buf, sizeof(buf), f, args);
-		va_end(args);
-		UART0_SendString((uint8_t*)buf, strlen(buf));
-		return strlen(buf);
-	}
+int __wrap_printf(const char* f, ...) {
+	va_list args;
+	va_start(args, f);
+	mini_vsnprintf(buf, sizeof(buf), f, args);
+	va_end(args);
+	UART0_SendString((uint8_t*)buf, strlen(buf));
+	return strlen(buf);
+}
 
-	int __wrap_vprintf(const char* f, va_list a) {
-		int ret = mini_vsnprintf(buf, sizeof(buf), f, a);
-		UART0_SendString((uint8_t*)buf, strlen(buf));
-		return ret;
-	}
-	int __wrap_sprintf(char* s, const char* f, ...) {
-		va_list args;
-		va_start(args, f);
-		int ret = mini_vsnprintf(s, SIZE_MAX, f, args);
-		va_end(args);
-		return ret;
-	}
-	int __wrap_vsprintf(char* s, const char* f, va_list a) { return 0; }
-	int __wrap_asprintf(char** s, const char* f, ...) { return 0; }
-	int __wrap_vasprintf(char** s, const char* f, va_list a) { return 0; }
+int __wrap_vprintf(const char* f, va_list a) {
+	int ret = mini_vsnprintf(buf, sizeof(buf), f, a);
+	UART0_SendString((uint8_t*)buf, strlen(buf));
+	return ret;
+}
 
-	int __wrap_snprintf(char* s, size_t n, const char* f, ...) {
-		va_list args;
-		va_start(args, f);
-		int ret = mini_vsnprintf(s, n, f, args);
-		va_end(args);
-		return ret;
-	}
+int __wrap_sprintf(char* s, const char* f, ...) {
+	va_list args;
+	va_start(args, f);
+	int ret = mini_vsnprintf(s, SIZE_MAX, f, args);
+	va_end(args);
+	return ret;
+}
 
-	int __wrap_vsnprintf(char* s, size_t n, const char* f, va_list a) {
-		return mini_vsnprintf(s, n, f, a);
-	}
+int __wrap_vsprintf(char* s, const char* f, va_list a) { return 0; }
+int __wrap_asprintf(char** s, const char* f, ...) { return 0; }
+int __wrap_vasprintf(char** s, const char* f, va_list a) { return 0; }
+
+int __wrap_snprintf(char* s, size_t n, const char* f, ...) {
+	va_list args;
+	va_start(args, f);
+	int ret = mini_vsnprintf(s, n, f, args);
+	va_end(args);
+	return ret;
+}
+
+int __wrap_vsnprintf(char* s, size_t n, const char* f, va_list a) {
+	return mini_vsnprintf(s, n, f, a);
+}
 }
 
 class ServerCallbacks: public NimBLEServerCallbacks {
@@ -289,16 +299,19 @@ class DescriptorCallbacks: public NimBLEDescriptorCallbacks {
 		Serialprintf("%s Descriptor read\n", pDescriptor->getUUID().toString().c_str());
 	}
 } dscCallbacks;
+
 static void format_mac_upper(const uint8_t* mac, char* out /* size >= 18 */) {
 	static const char hex[] = "0123456789ABCDEF";
 	for (int i = 0; i < 6; ++i) {
-		uint8_t b = mac[5 - i]; // keep original ordering mac[5] .. mac[0]
+		uint8_t b      = mac[5 - i]; // keep original ordering mac[5] .. mac[0]
 		out[i * 3 + 0] = hex[(b >> 4) & 0x0F];
 		out[i * 3 + 1] = hex[b & 0x0F];
 		out[i * 3 + 2] = (i < 5) ? ':' : '\0';
 	}
 }
+
 static NimBLEServer* pServer;
+
 void setup() {
 	// UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
 	// PrintHex(watermark);
@@ -347,16 +360,28 @@ void setup() {
 	char macstr[18];
 	format_mac_upper(mac, macstr);
 	Serialprintf("BLE MAC: %s\n", macstr);
-
-
 }
 
+extern "C"  {
+	extern volatile uint32_t hal_timer_chk_queue_hits;
+	extern volatile uint32_t hal_timer_chk_queue_execs;
+	extern volatile uint32_t hal_timer_queue_inserts;
+	extern volatile uint32_t halTimerLastExpiry;
+	extern volatile uint32_t halTimerCheckCnt;
+}
 void loop() {
 	loopCounter++;
 	// Serials.println("Looping...");
 	ledState = (ledState == LOW) ? HIGH : LOW;
 	digitalWrite(PA8, ledState);
-	Serialprintf("Hello %d\n", loopCounter);
+	Serialprintf(
+		"Loop: %d, Exec: %d, Insert: %d Expiry: %d, Cnt: %d\n",
+		loopCounter,
+		hal_timer_chk_queue_execs,
+		hal_timer_queue_inserts,
+		halTimerLastExpiry,
+		halTimerCheckCnt
+	);
 	delay(5000);
 }
 
@@ -372,6 +397,7 @@ void vApplicationMallocFailedHook(void) {
 	while (1) {
 	} // Halt here
 }
+
 //
 // void vApplicationIdleHook(void) {
 // 	static volatile uint32_t idleCounter = 0;
@@ -379,7 +405,42 @@ void vApplicationMallocFailedHook(void) {
 // }
 
 void abort(void) {
-	Serialprintf("ABORT called!");
-	while (1); // Stop here in debugger
+	portENTER_CRITICAL();
+
+	printf("=== ABORT CALLED ===\n");
+
+	// Get stack pointer and frame pointer
+	uint32_t sp, fp, ra, pc;
+	__asm__ volatile("mv %0, sp" : "=r"(sp));
+	__asm__ volatile("mv %0, s0" : "=r"(fp));  // Frame pointer
+	__asm__ volatile("mv %0, ra" : "=r"(ra));  // Return address
+	pc = (uint32_t)__builtin_return_address(0);
+
+	printf("SP: 0x%08lx\n", sp);
+	printf("FP: 0x%08lx\n", fp);
+	printf("RA: 0x%08lx\n", ra);
+	printf("PC: 0x%08lx\n", pc);
+
+	// Simple stack dump (16 words)
+	printf("\nStack dump:\n");
+	uint32_t* stack = (uint32_t*)sp;
+	for(int i = 0; i < 16; i++) {
+		printf("0x%08lx: 0x%08lx\n", (uint32_t)&stack[i], stack[i]);
+	}
+
+	// Backtrace attempt (walk frame pointers)
+	printf("\nBacktrace:\n");
+	uint32_t* frame = (uint32_t*)fp;
+	for(int depth = 0; depth < 10 && frame; depth++) {
+		if((uint32_t)frame < 0x20000000 || (uint32_t)frame > 0x20007000) {
+			break;  // Invalid frame pointer
+		}
+		uint32_t ret_addr = frame[-1];  // Return address typically at fp-4
+		printf("#%d: 0x%08lx\n", depth, ret_addr);
+		frame = (uint32_t*)frame[-2];  // Previous frame pointer at fp-8
+	}
+
+	while(1){};  // Halt
 }
+
 }
