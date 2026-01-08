@@ -47,15 +47,16 @@ static inline void NVIC_SetPriority(IRQn_Type IRQn, uint8_t priority) {
 	NVIC->IPRIOR[(uint32_t)(IRQn)] = priority;
 }
 
+volatile uint32_t lleIrqCount = 0;
 // CH592 interrupt handlers
-__INTERRUPT
+// __INTERRUPT
+__HIGH_CODE
 void LLE_IRQHandler() {
-// void RADIO_IRQHandler(void) {
-	// TODO: check why this interrupt goes before we start
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	lleIrqCount++;
 	((void (*)(void))radio_isr_addr)();
 	PFIC->IPRR[0] = (1 << 8);
-	// TODO: is this needed?
-	asm volatile("fence" ::: "memory");
+	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 #ifdef HAS_HW_RNG
 __HIGH_CODE

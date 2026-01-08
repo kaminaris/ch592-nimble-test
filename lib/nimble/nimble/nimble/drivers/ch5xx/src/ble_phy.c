@@ -53,7 +53,6 @@ extern void tm_tick(void);
 static void ble_phy_isr(void);
 
 #include "../include/ble/xcvr.h"
-#include "../include/ble/iSLER.h"
 // #include "nimble/ble.h"
 // #include "nimble/nimble_opt.h"
 // #include "controller/ble_phy.h"
@@ -114,6 +113,11 @@ static struct ble_phy_obj g_ble_phy_data;
 // TODO: not sure if aligning this is necessary on CH59x
 __attribute__((aligned(4))) static uint32_t g_ble_phy_tx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
 __attribute__((aligned(4))) static uint32_t g_ble_phy_rx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
+static uint8_t* g_ble_phy_rx_buf_ptr = (uint8_t*)g_ble_phy_rx_buf;
+// 3 bytes in rx buff
+#define LL_EXTERNAL_BUFFER ((uint32_t)(g_ble_phy_rx_buf_ptr + 3))
+
+#include "../include/ble/iSLER.h"
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
 /* Make sure word-aligned for faster copies */
@@ -794,7 +798,8 @@ ble_phy_rx_xcvr_setup(void)
         NRF_RADIO->PACKETPTR = (uint32_t)dptr;
     }
 #else
-    LL->RXBUF = (uint32_t)dptr;
+    // TODO: maybe?
+    // LL->RXBUF = (uint32_t)dptr;
 #endif
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
@@ -817,10 +822,10 @@ ble_phy_rx_xcvr_setup(void)
     /* No hardware PPI on CH592 - these are NOPs or handled differently */
 
     /* Disable TMR0 compare interrupt that would trigger radio TXEN */
-    R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
+    //R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
 
     /* Clear any pending timer interrupt */
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+    //R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
     /* CH592: No AAR (Address Resolution) hardware equivalent */
     /* If you implemented software AAR, disable its trigger here */
@@ -1753,7 +1758,7 @@ ble_phy_rx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
 
     return rc;
 }
-
+volatile uint32_t txCallsCnt = 0;
 int
 ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 {
@@ -1764,7 +1769,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     uint8_t hdr_byte;
     uint32_t state;
     uint32_t shortcuts;
-
+    ++txCallsCnt;
     if (g_ble_phy_data.phy_transition_late) {
         ble_phy_disable();
         STATS_INC(ble_phy_stats, tx_late);
@@ -1828,14 +1833,21 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     // Frame_TX(accessAddress, pktptr, payload_len, channelSet, PHY_1M, crcInit);
     BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
+    DevSetChannel(g_ble_phy_data.phy_chan);
+
     // Uncomment to disable whitening to debug RF.
     //BB->CTRL_CFG |= (1<<6);
     DevSetMode(DEVSETMODE_TX);
-    LL->TXBUF = (uint32_t)pktptr;
 
+    BB->ACCESSADDRESS1 = g_ble_phy_data.phy_access_address; // access address
+    BB->CRCINIT1 = 0x555555;; // crc init
+
+    LL->TXBUF = (uint32_t)pktptr;
+    // for( int timeout = 3000; !(RF->RF26 & 0x1000000) && timeout >= 0; timeout-- );
+    for (int timeout = 3000; timeout > 0 && !(RF->RF26 & 0x1000000); timeout--);
     // default 1M for now TODO: may not be needed?
     BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_2M: CTRL_CFG_PHY_1M;
-
+    LL->LL4 &= 0xfffdffff;
 
     /* Clear all pending status flags (write-1-to-clear) */
     LL->STATUS = LL_STATUS_TX;
@@ -1845,8 +1857,23 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     /* READY->START and END->DISABLE happen implicitly */
 
     /* Enable the interrupt for radio operations complete */
-    LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
+    // ohhhhhh its the isler line that makes it enabled
+    //TODO: wtf?
+    // LL->INT_EN = 0x1f000f;
+    LL->INT_EN = (1 << 0);
+    LL->TMR = (uint32_t)(payload_len *512); // needs optimisation, per phy mode
 
+    BB->CTRL_CFG |= CTRL_CFG_START_TX;
+    BB->CTRL_TX &= 0xfffffffc;
+
+    LL->LL0 = 2; // Not sure what this does, but on RX it's 1
+    while(LL->TMR);
+    DevSetMode(0);
+    if(LL->LL0 & 3) {
+        LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+        LL->LL0 |= 0x08;
+    }
+    // LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
     /* Set the PHY transition */
     g_ble_phy_data.phy_transition = end_trans;
 

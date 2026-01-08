@@ -368,6 +368,8 @@ extern "C"  {
 	extern volatile uint32_t hal_timer_queue_inserts;
 	extern volatile uint32_t halTimerLastExpiry;
 	extern volatile uint32_t halTimerCheckCnt;
+	extern volatile uint32_t txCallsCnt;
+	extern volatile uint32_t lleIrqCount;
 }
 void loop() {
 	loopCounter++;
@@ -375,8 +377,9 @@ void loop() {
 	ledState = (ledState == LOW) ? HIGH : LOW;
 	digitalWrite(PA8, ledState);
 	Serialprintf(
-		"Loop: %d, Exec: %d, Insert: %d Expiry: %d, Cnt: %d\n",
-		loopCounter,
+		"TX: %d, IRQ: %d, Exec: %d, Ins: %d Exp: %d, Cnt: %d\n",
+		txCallsCnt,
+		lleIrqCount,
 		hal_timer_chk_queue_execs,
 		hal_timer_queue_inserts,
 		halTimerLastExpiry,

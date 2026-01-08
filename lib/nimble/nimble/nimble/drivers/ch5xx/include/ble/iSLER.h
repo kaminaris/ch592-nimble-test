@@ -445,10 +445,14 @@ static inline void DevInit(uint8_t TxPower) {
 	LL->LL8 = 0xffffffff;
 	LL->LL11 = 0x6e;
 	LL->LL21 = 0x14;
-	LL->INT_EN = 0x1f000f;
+	//TODO: verify
+	// LL->INT_EN = 0x1f000f;
+	LL->INT_EN = 0;
 #endif
 #ifndef LL_EXTERNAL_BUFFER
 	LL->RXBUF = (uint32_t)LLE_BUF;
+#else
+	LL->RXBUF = LL_EXTERNAL_BUFFER;
 #endif
 
 	LL->STATUS = 0xffffffff;
