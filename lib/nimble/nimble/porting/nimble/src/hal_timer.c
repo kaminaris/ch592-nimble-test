@@ -57,6 +57,7 @@ struct ch592_hal_timer {
 	uint8_t tmr_irq_num;
 	uint8_t tmr_pad[2];
 	uint32_t tmr_cntr; // Software counter extension (for >24-bit)
+	uint32_t tmr_cmp; // Software tick interrupt
 	uint32_t timer_isrs;
 	uint32_t tmr_freq;
 	void* tmr_reg; // Pointer to CH592 timer registers
@@ -133,23 +134,11 @@ static uint32_t ch592_read_timer_cntr(struct ch592_hal_timer* bsptimer) {
  * @param timer Pointer to timer.
  */
 static void ch592_timer_set_ocmp(struct ch592_hal_timer* bsptimer, uint32_t expiry) {
-	// uint32_t current = ch592_read_timer_cntr(bsptimer);
-	//
-	// // If already expired, fire ISR immediately
-	// if ((int32_t)(current - expiry) >= 0) {
-	// 	// Trigger interrupt manually
-	// 	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-	// 	TMR0_ITCfg(1, RB_TMR_IE_CYC_END);
-	// 	return;
-	// }
+	if (bsptimer == NULL) {
+		return;
+	}
 
-	// TMR0_ITCfg(0, RB_TMR_IE_CYC_END);
-	//
-	// // Write only the lower 24 bits of the absolute expiry
-	// R32_TMR0_CNT_END = expiry & CH592_TIMER_MASK;
-	//
-	// R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-	// TMR0_ITCfg(1, RB_TMR_IE_CYC_END);
+	bsptimer->tmr_cmp = expiry;
 }
 
 
@@ -161,10 +150,7 @@ static void ch592_timer_disable_ocmp(struct ch592_hal_timer* bsptimer) {
 		return;
 	}
 
-	/* Currently only TMR0 support implemented in this HAL file.
-	   Disable the cycle-end (compare) interrupt and clear any pending flag. */
-	// TMR0_ITCfg(0, RB_TMR_IE_CYC_END);    /* disable interrupt */
-	// R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;/* clear pending flag */
+	bsptimer->tmr_cmp = 0;
 }
 
 #if (MYNEWT_VAL(TIMER_0) || MYNEWT_VAL(TIMER_1) || MYNEWT_VAL(TIMER_2) || MYNEWT_VAL(TIMER_3))
@@ -175,6 +161,7 @@ volatile uint32_t hal_timer_chk_queue_hits = 0;
 volatile uint32_t hal_timer_chk_queue_execs = 0;
 volatile uint32_t halTimerLastExpiry = 0;
 volatile uint32_t halTimerCheckCnt = 0;
+volatile uint32_t halTimerCheckFail = 0;
 
 static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	uint32_t tcntr;
@@ -184,8 +171,7 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	OS_ENTER_CRITICAL(sr);
 	while ((timer = TAILQ_FIRST(&bsptimer->hal_timer_q)) != NULL) {
 		tcntr = ch592_read_timer_cntr(bsptimer);
-		halTimerLastExpiry = timer->expiry;
-		halTimerCheckCnt = tcntr;
+
 		if ((int32_t)(tcntr - timer->expiry) >= 0) {
 			TAILQ_REMOVE(&bsptimer->hal_timer_q, timer, link);
 			timer->link.tqe_prev = NULL;
@@ -193,6 +179,9 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 			hal_timer_chk_queue_execs++;
 		}
 		else {
+			halTimerLastExpiry = timer->expiry;
+			halTimerCheckCnt = tcntr;
+			halTimerCheckFail++;
 			break;
 		}
 	}
@@ -254,14 +243,20 @@ void ch592_timer3_irq_handler(void) {
 }
 #endif
 
+volatile uint32_t osTimerTest = 0;
+
 __HIGH_CODE
 // __INTERRUPT
 // void TMR0_IRQHandler(void) __attribute__((interrupt));
 void TMR0_IRQHandler(void) {
-	// Call the generic timer interrupt handler
+	// TODO: Not sure if this is needed
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	ch592_hal_timer0.tmr_cntr++;
-	ch592_timer0_irq_handler();
+	osTimerTest = ch592_hal_timer0.tmr_cntr;
+	if (ch592_hal_timer0.tmr_cmp && ch592_hal_timer0.tmr_cmp == ch592_hal_timer0.tmr_cntr) {
+		ch592_timer0_irq_handler();
+	}
+	// TODO: not sure when to clear flag
 	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }

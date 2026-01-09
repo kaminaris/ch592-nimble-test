@@ -58,6 +58,10 @@ static void ble_phy_isr(void);
 // #include "controller/ble_phy.h"
 // #include "controller/ble_ll.h"
 
+// TODO: untested
+#define LLIRQ_RX_DONE            (1<<8)
+#define LLIRQ_TX_DONE            (1<<9)
+
 /*
  * XXX: Maximum possible transmit time is 1 msec for a 60ppm crystal
  * and 16ms for a 30ppm crystal! We need to limit PDU size based on
@@ -242,29 +246,7 @@ ble_phy_mode_is_coded(uint8_t phy_mode)
            (phy_mode == BLE_PHY_MODE_CODED_500KBPS);
 }
 
-static void
-phy_nrf52_errata_191(uint8_t new_phy_mode)
-{
-    bool from_coded = ble_phy_mode_is_coded(g_ble_phy_data.phy_cur_phy_mode);
-    bool to_coded = ble_phy_mode_is_coded(new_phy_mode);
 
-    /* [191] RADIO: High packet error rate in BLE Long Range mode
-     * Should be applied only if switching to/from LE Coded, no need to apply
-     * on each mode change.
-     */
-    if (from_coded == to_coded) {
-        return;
-    }
-
-    if (to_coded) {
-        *(volatile uint32_t *)0x40001740 =
-            ((*((volatile uint32_t *)0x40001740)) & 0x7fff00ff) |
-            0x80000000 | (((uint32_t)(196)) << 8);
-    } else {
-        *(volatile uint32_t *) 0x40001740 =
-            ((*((volatile uint32_t *) 0x40001740)) & 0x7fffffff);
-    }
-}
 #endif
 
 static void
@@ -466,7 +448,7 @@ ble_phy_tifs_set(uint16_t tifs)
 	g_ble_phy_data.tifs = tifs;
 }
 #endif
-
+extern volatile uint32_t osTimerTest;
 /**
  *
  *
@@ -534,14 +516,14 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
 
     /* Clear and set TIMER0 to fire off at proper time */
     // CH592: Stop and clear TMR0
-    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
-    R32_TMR0_COUNT = 0;                     // Clear counter (not R32_TMR0_CNT)
+    // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
+    // R32_TMR0_COUNT = 0;                     // Clear counter (not R32_TMR0_CNT)
 
     // CH592: Set compare value for TMR0
-    R32_TMR0_CNT_END = radio_rem_us + rem_us_corr;
+    // R32_TMR0_CNT_END = radio_rem_us + rem_us_corr;
 
     // CH592: Clear timer interrupt flag
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
     /* Set RTC compare to start TIMER0 */
     // CH592: Clear RTC trigger flag
@@ -584,16 +566,16 @@ ble_phy_set_start_now(void)
 
     /* Clear and set TIMER0 to fire off at proper time */
     // CH592: Stop timer
-    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
+    // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
 
     // CH592: Clear counter
-    R32_TMR0_COUNT = 0;
+    // R32_TMR0_COUNT = 0;
 
     // CH592: Set compare value
-    R32_TMR0_CNT_END = radio_rem_us;
+    // R32_TMR0_CNT_END = radio_rem_us;
 
     // CH592: Clear compare interrupt flag
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
 
     /*
@@ -605,13 +587,13 @@ ble_phy_set_start_now(void)
     now = os_cputime_get32();
 
     // CH592: Clear RTC trigger flag
-    R8_RTC_FLAG_CTRL |= RB_RTC_TRIG_CLR;
+    // R8_RTC_FLAG_CTRL |= RB_RTC_TRIG_CLR;
 
     // CH592: Set RTC trigger value (N+3 ticks from now)
-    R32_RTC_TRIG = (now + 3) & 0xffffff;
+    // R32_RTC_TRIG = (now + 3) & 0xffffff;
 
     // CH592: Enable RTC trigger mode
-    R8_RTC_MODE_CTRL |= RB_RTC_TRIG_EN;
+    // R8_RTC_MODE_CTRL |= RB_RTC_TRIG_EN;
 
     /* Enable PPI equivalent - needs RTC ISR handler */
     // CH592: No hardware PPI - must handle in RTC interrupt
@@ -699,16 +681,16 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
     end_time += g_ble_phy_t_rxaddrdelay[phy];
 
     /* CH592: Set TMR0 compare value for wait-for-response timeout */
-    R32_TMR0_CNT_END = end_time;
+    // R32_TMR0_CNT_END = end_time;
 
     /* CH592: Clear timer compare interrupt flag */
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
     /* Enable wait for response PPI */
     // CH592: No hardware PPI - handle timeout in TMR0 interrupt
     // TODO: Enable TMR0 interrupt to trigger radio disable on timeout
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear flag again before enabling
-    R8_TMR0_INTER_EN |= RB_TMR_IE_CYC_END; // Enable compare interrupt
+    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear flag again before enabling
+    // R8_TMR0_INTER_EN |= RB_TMR_IE_CYC_END; // Enable compare interrupt
 
 
     /*
@@ -724,17 +706,17 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
      * it can be used to read TIMER0 counter.
      */
     /* CH592: Manually capture current timer value */
-    uint32_t current_time = R32_TMR0_COUNT;
+    uint32_t current_time = osTimerTest;
 
     /* Check if timer already passed the compare value (timeout already occurred) */
-    if (current_time > R32_TMR0_CNT_END) {
+    if (current_time > osTimerTest) {
         /* Timeout already happened - disable radio manually */
 
         /* Disable TMR0 compare interrupt */
-        R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
+        // R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
 
         /* Clear interrupt flag */
-        R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+        // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
         /* Trigger radio disable */
         // TODO: Add CH592 radio disable command here
@@ -900,7 +882,7 @@ ble_phy_tx_end_isr(void)
     uint16_t tifs;
 
     /* CH592: Capture TX end time from TMR0 */
-    g_ble_phy_data.g_tx_end_time = R32_TMR0_COUNT;
+    g_ble_phy_data.g_tx_end_time = osTimerTest;
 
     /* Store PHY on which we've just transmitted smth */
     tx_phy_mode = g_ble_phy_data.phy_cur_phy_mode;
@@ -947,10 +929,10 @@ ble_phy_tx_end_isr(void)
 
         /* CH592: Set up timer for RX start after TIFS */
         // Stop timer
-        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
+        // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
 
         // Clear counter
-        R32_TMR0_COUNT = 0;
+        // R32_TMR0_COUNT = 0;
 
         // Calculate when to start RX (TX end + TIFS)
         rx_time = g_ble_phy_data.g_tx_end_time + tifs;
@@ -959,13 +941,13 @@ ble_phy_tx_end_isr(void)
         rx_time += 1; // Extra compensation for timer cycle
 
         // Set compare for RX enable
-        R32_TMR0_CNT_END = rx_time;
+        // R32_TMR0_CNT_END = rx_time;
 
         // Clear interrupt flag
-        R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+        // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
 
         // Start timer
-        R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;
+        // R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;
 
         // TODO: You'll need to handle RX enable in TMR0 ISR when it fires
 
@@ -1031,8 +1013,8 @@ ble_phy_tx_end_isr(void)
          * it should be stopped here.
          */
         /* CH592: Stop timer and disable radio operations */
-        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop TMR0
-        R32_TMR0_COUNT = 0;                     // Clear counter
+        // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop TMR0
+        // R32_TMR0_COUNT = 0;                     // Clear counter
 
         /* Disable radio interrupts */
         LL->INT_EN = 0;
@@ -1090,7 +1072,7 @@ ble_phy_rx_end_isr(void)
     /* Disable automatic RXEN */
     /* CH592: Disable automatic RX operations */
     /* Stop TMR0 if it was scheduling RX */
-    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
+    // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
 
     /* Disable radio interrupts for RX */
     LL->INT_EN &= ~0x0F; // Clear RX-related interrupt enables
@@ -1178,11 +1160,11 @@ ble_phy_rx_end_isr(void)
 
     radio_time = tx_time - BLE_PHY_T_TXENFAST;
     /* CH592: Set up timer to trigger TX at precise time */
-    R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
-    R32_TMR0_COUNT = 0;                     // Clear counter
-    R32_TMR0_CNT_END = radio_time;          // Set compare value for TX timing
-    R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear interrupt flag
-    R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;    // Start timer
+    // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
+    // R32_TMR0_COUNT = 0;                     // Clear counter
+    // R32_TMR0_CNT_END = radio_time;          // Set compare value for TX timing
+    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear interrupt flag
+    // R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;    // Start timer
 
 
     /* Need to check if TIMER0 did not already count past CC[0] and/or CC[2], so
@@ -1191,10 +1173,10 @@ ble_phy_rx_end_isr(void)
      *
      * Note: CC[3] is used only for wfr which we do not need here.
      */
-    is_late = (R32_TMR0_COUNT > radio_time);
+    is_late = (osTimerTest > radio_time);
 
     if (is_late) {
-        R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
+        // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop timer
         g_ble_phy_data.phy_transition_late = 1;
     }
 
@@ -1224,7 +1206,7 @@ ble_phy_rx_start_isr(void)
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
     int adva_offset;
 #endif
-    g_ble_phy_data.g_aa_timestamp = R32_TMR0_COUNT;
+    g_ble_phy_data.g_aa_timestamp = osTimerTest;
     dptr = (uint8_t *)&g_ble_phy_rx_buf[0];
 
     /* CH592: Clear RX start event and interrupt */
@@ -1335,17 +1317,19 @@ ble_phy_rx_start_isr(void)
     return true;
 }
 
+volatile uint32_t lleIrqCount = 0;
 static void
 ble_phy_isr(void)
 {
     uint32_t status;
     uint32_t irq_en;
+    lleIrqCount++;
 
     os_trace_isr_enter();
     // Check if this is a TX ADDRESS event (access address transmitted)
     if (g_ble_phy_data.phy_state == BLE_PHY_STATE_TX) {
         // Capture AA timestamp when address is transmitted
-        g_ble_phy_data.g_aa_timestamp = R32_TMR0_COUNT;
+        g_ble_phy_data.g_aa_timestamp = osTimerTest;
     }
     /* Read irq register to determine which interrupts are enabled */
     irq_en = LL->INT_EN;
@@ -1425,6 +1409,17 @@ ble_phy_isr(void)
 
     os_trace_isr_exit();
 
+}
+
+// CH592 interrupt handlers
+// __INTERRUPT
+__HIGH_CODE
+void LLE_IRQHandler() {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    lleIrqCount++;
+    ble_phy_isr();
+    PFIC->IPRR[0] = (1 << 8);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 #if PHY_USE_HEADERMASK_WORKAROUND
@@ -1557,7 +1552,7 @@ ble_phy_rx(void)
     nrf_wait_disabled();
 
     // Capture timestamp when enabling RX
-    g_ble_phy_data.g_rxen_timestamp = R32_TMR0_COUNT;
+    g_ble_phy_data.g_rxen_timestamp = osTimerTest;
 
     /* Check radio state - CH592 approach */
 
@@ -1860,7 +1855,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     // ohhhhhh its the isler line that makes it enabled
     //TODO: wtf?
     // LL->INT_EN = 0x1f000f;
-    LL->INT_EN = (1 << 0);
+    // LL->INT_EN = LLIRQ_TX_DONE;
     LL->TMR = (uint32_t)(payload_len *512); // needs optimisation, per phy mode
 
     BB->CTRL_CFG |= CTRL_CFG_START_TX;
@@ -1893,6 +1888,8 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         STATS_INC(ble_phy_stats, tx_late);
         rc = BLE_PHY_ERR_RADIO_STATE;
     }
+
+    ble_phy_isr();
 
     return rc;
 }

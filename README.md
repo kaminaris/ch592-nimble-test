@@ -69,6 +69,14 @@ echo "Ready for Remote Connections"
 
 ## Commands
 
+### upload debug build
+
+`pio run -t clean -e ch592f && pio debug && ~/.platformio/packages/tool-minichlink/minichlink.exe -w /a/Projects/Electronic/CH59/CH592FNimbleTest/.pio/build/ch592f/firmware.bin 0x0 -b`
+
+and run debugger
+
+`pio run -t clean -e ch592f && pio debug && ~/.platformio/packages/tool-minichlink/minichlink.exe -w /a/Projects/Electronic/CH59/CH592FNimbleTest/.pio/build/ch592f/firmware.bin 0x0 -b && ~/.platformio/packages/tool-minichlink/minichlink.exe -b -a -G`
+
 ### debug verbose
 
 `pio debug  --interface=gdb -v`

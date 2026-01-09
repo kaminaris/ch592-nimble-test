@@ -721,7 +721,7 @@ ble_ll_sched_adv_new(struct ble_ll_sched_item *sch, ble_ll_sched_adv_new_cb cb,
 {
     os_sr_t sr;
     int rc;
-
+    printf("Sched");
     OS_ENTER_CRITICAL(sr);
 
     rc = ble_ll_sched_insert(sch, BLE_LL_SCHED_MAX_DELAY_ANY,
