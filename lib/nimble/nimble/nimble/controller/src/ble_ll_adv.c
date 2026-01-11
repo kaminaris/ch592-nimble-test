@@ -1202,13 +1202,13 @@ adv_tx_done:
     ble_ll_adv_tx_done(advsm);
     return BLE_LL_SCHED_STATE_DONE;
 }
-
+volatile uint32_t schedCntr = 0;
 static void
 ble_ll_adv_set_sched(struct ble_ll_adv_sm *advsm)
 {
     uint32_t max_usecs;
     struct ble_ll_sched_item *sch;
-
+    schedCntr++;
     sch = &advsm->adv_sch;
     sch->cb_arg = advsm;
     sch->sched_cb = ble_ll_adv_tx_start_cb;

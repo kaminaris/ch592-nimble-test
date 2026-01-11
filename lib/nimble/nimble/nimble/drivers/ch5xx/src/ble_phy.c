@@ -631,6 +631,8 @@ ble_phy_set_start_now(void)
  * @param tx_phy_mode phy mode for last TX (only valid for TX->RX)
  * @param wfr_usecs Amount of usecs to wait.
  */
+volatile uint8_t timerExpired = 0;
+volatile uint32_t timerExpiredAt = 0;
 void
 ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
 {
@@ -681,11 +683,21 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
     end_time += g_ble_phy_t_rxaddrdelay[phy];
 
     uint32_t current_time = osTimerTest;
-
     /* Check if timer already passed the compare value (timeout already occurred) */
-    if (current_time > osTimerTest) {
-
-        DevSetMode(0);
+    if (current_time > end_time) {
+        timerExpired++;
+        ble_ll_wfr_timer_exp(NULL);
+    } else {
+        timerExpired+=10;
+        timerExpiredAt = end_time;
+        /* Set the timeout */
+        struct hal_timer tmr = {
+            .bsp_timer = 0,
+            .cb_func = ble_ll_wfr_timer_exp,
+            .cb_arg = NULL,
+            .expiry = end_time,
+        };
+        hal_timer_start_at(&tmr, end_time);
     }
 }
 

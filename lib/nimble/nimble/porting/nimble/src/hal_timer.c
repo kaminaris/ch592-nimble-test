@@ -48,9 +48,8 @@ typedef void (* hal_timer_irq_handler_t)(void);
 
 #define	TMR0_ITCfg(s,f)				((s)?(R8_TMR0_INTER_EN|=f):(R8_TMR0_INTER_EN&=~f))		/* TMR0 corresponding interrupt bit on and off */
 
-
 #define  TMR0_GetCurrentCount()		R32_TMR0_COUNT
-#define CH592_HAL_TIMER_MAX     (4)
+#define CH592_HAL_TIMER_MAX     1
 
 struct ch592_hal_timer {
 	uint8_t tmr_enabled;
@@ -64,53 +63,8 @@ struct ch592_hal_timer {
 	TAILQ_HEAD(hal_timer_qhead, hal_timer) hal_timer_q;
 };
 
-#if MYNEWT_VAL(TIMER_0)
+
 struct ch592_hal_timer ch592_hal_timer0;
-#endif
-#if MYNEWT_VAL(TIMER_1)
-struct ch592_hal_timer ch592_hal_timer1;
-#endif
-#if MYNEWT_VAL(TIMER_2)
-struct ch592_hal_timer ch592_hal_timer2;
-#endif
-#if MYNEWT_VAL(TIMER_3)
-struct ch592_hal_timer ch592_hal_timer3;
-#endif
-
-static const struct ch592_hal_timer* ch592_hal_timers[CH592_HAL_TIMER_MAX] = {
-#if MYNEWT_VAL(TIMER_0)
-	&ch592_hal_timer0,
-#else
-	NULL,
-#endif
-#if MYNEWT_VAL(TIMER_1)
-	&ch592_hal_timer1,
-#else
-	NULL,
-#endif
-#if MYNEWT_VAL(TIMER_2)
-	&ch592_hal_timer2,
-#else
-	NULL,
-#endif
-#if MYNEWT_VAL(TIMER_3)
-	&ch592_hal_timer3
-#else
-	NULL
-#endif
-};
-
-/* Resolve timer number into timer structure */
-#define CH592_HAL_TIMER_RESOLVE(__n, __v)       \
-    if ((__n) >= CH592_HAL_TIMER_MAX) {         \
-        rc = EINVAL;                            \
-        goto err;                               \
-    }                                           \
-    (__v) = (struct ch592_hal_timer *) ch592_hal_timers[(__n)];            \
-    if ((__v) == NULL) {                        \
-        rc = EINVAL;                            \
-        goto err;                               \
-    }
 
 #ifndef CH592_TIMER_MASK
 #define CH592_TIMER_MASK  (0x3FFFFFFu)  // 26-bit mask, not 24-bit
@@ -153,7 +107,6 @@ static void ch592_timer_disable_ocmp(struct ch592_hal_timer* bsptimer) {
 	bsptimer->tmr_cmp = 0;
 }
 
-#if (MYNEWT_VAL(TIMER_0) || MYNEWT_VAL(TIMER_1) || MYNEWT_VAL(TIMER_2) || MYNEWT_VAL(TIMER_3))
 /**
  * Check timer queue and process expired timers
  */
@@ -196,7 +149,6 @@ static void hal_timer_chk_queue(struct ch592_hal_timer* bsptimer) {
 	}
 	OS_EXIT_CRITICAL(sr);
 }
-#endif
 
 /**
  * hal timer irq handler
@@ -217,37 +169,13 @@ static void hal_timer_irq_handler(struct ch592_hal_timer* bsptimer) {
 	os_trace_isr_exit();
 }
 
-
-/* Timer interrupt handlers - connect these to CH592 interrupt vectors */
-#if MYNEWT_VAL(TIMER_0)
 void ch592_timer0_irq_handler(void) {
 	hal_timer_irq_handler(&ch592_hal_timer0);
 }
-#endif
-
-#if MYNEWT_VAL(TIMER_1)
-void ch592_timer1_irq_handler(void) {
-	hal_timer_irq_handler(&ch592_hal_timer1);
-}
-#endif
-
-#if MYNEWT_VAL(TIMER_2)
-void ch592_timer2_irq_handler(void) {
-	hal_timer_irq_handler(&ch592_hal_timer2);
-}
-#endif
-
-#if MYNEWT_VAL(TIMER_3)
-void ch592_timer3_irq_handler(void) {
-	hal_timer_irq_handler(&ch592_hal_timer3);
-}
-#endif
 
 volatile uint32_t osTimerTest = 0;
 
 __HIGH_CODE
-// __INTERRUPT
-// void TMR0_IRQHandler(void) __attribute__((interrupt));
 void TMR0_IRQHandler(void) {
 	// TODO: Not sure if this is needed
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -277,9 +205,7 @@ void TMR0_IRQHandler(void) {
 int hal_timer_init(int timer_num, void* cfg) {
 	int rc;
 	uint8_t irq_num;
-	struct ch592_hal_timer* bsptimer;
-
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	/* If timer is enabled do not allow init */
 	if (bsptimer->tmr_enabled) {
@@ -378,9 +304,7 @@ uint32_t GetSysClock2(void) {
 int hal_timer_config(int timer_num, uint32_t freq_hz) {
 	int rc;
 	os_sr_t sr;
-	struct ch592_hal_timer* bsptimer;
-
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	if (bsptimer->tmr_enabled || (freq_hz == 0)) {
 		rc = EINVAL;
@@ -420,10 +344,9 @@ err:
 int hal_timer_deinit(int timer_num) {
 	int rc;
 	os_sr_t sr;
-	struct ch592_hal_timer* bsptimer;
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	rc = 0;
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
 
 	OS_ENTER_CRITICAL(sr);
 
@@ -440,7 +363,6 @@ int hal_timer_deinit(int timer_num) {
 
 	OS_EXIT_CRITICAL(sr);
 
-err:
 	return rc;
 }
 
@@ -456,16 +378,10 @@ err:
 uint32_t hal_timer_get_resolution(int timer_num) {
 	int rc;
 	uint32_t resolution;
-	struct ch592_hal_timer* bsptimer;
-
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	resolution = 1000000000 / bsptimer->tmr_freq;
 	return resolution;
-
-err:
-	rc = 0;
-	return rc;
 }
 
 /**
@@ -480,19 +396,11 @@ err:
 uint32_t hal_timer_read(int timer_num) {
 	int rc;
 	uint32_t tcntr;
-	struct ch592_hal_timer* bsptimer;
-
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	tcntr = ch592_read_timer_cntr(bsptimer);
 
 	return tcntr;
-
-    /* Assert here since there is no invalid return code */
-err:
-	assert(0);
-	rc = 0;
-	return rc;
 }
 
 /**
@@ -532,9 +440,7 @@ int hal_timer_set_cb(
 	void* arg
 ) {
 	int rc;
-	struct ch592_hal_timer* bsptimer;
-
-	CH592_HAL_TIMER_RESOLVE(timer_num, bsptimer);
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	timer->cb_func       = cb_func;
 	timer->cb_arg        = arg;
@@ -542,8 +448,6 @@ int hal_timer_set_cb(
 	timer->bsp_timer     = bsptimer;
 
 	rc = 0;
-
-err:
 	return rc;
 }
 
@@ -553,9 +457,7 @@ err:
 int hal_timer_start(struct hal_timer* timer, uint32_t ticks) {
 	int rc;
 	uint32_t tick;
-	struct ch592_hal_timer* bsptimer;
-
-	bsptimer = (struct ch592_hal_timer*)timer->bsp_timer;
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 	tick     = ch592_read_timer_cntr(bsptimer) + ticks;
 	rc       = hal_timer_start_at(timer, tick);
 	return rc;
@@ -564,14 +466,15 @@ int hal_timer_start(struct hal_timer* timer, uint32_t ticks) {
 volatile uint32_t hal_timer_queue_inserts = 0;
 int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
 	os_sr_t sr;
+	int rc;
 	struct hal_timer* entry;
-	struct ch592_hal_timer* bsptimer;
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	if ((timer == NULL) || (timer->link.tqe_prev != NULL) ||
 		(timer->cb_func == NULL)) {
 		return EINVAL;
 	}
-	bsptimer      = (struct ch592_hal_timer*)timer->bsp_timer;
+
 	timer->expiry = tick;
 
 	OS_ENTER_CRITICAL(sr);
@@ -615,15 +518,16 @@ int hal_timer_start_at(struct hal_timer* timer, uint32_t tick) {
  */
 int hal_timer_stop(struct hal_timer* timer) {
 	os_sr_t sr;
+	int rc;
 	int reset_ocmp;
 	struct hal_timer* entry;
-	struct ch592_hal_timer* bsptimer;
+	struct ch592_hal_timer* bsptimer = &ch592_hal_timer0;
 
 	if (timer == NULL) {
 		return EINVAL;
 	}
 
-	bsptimer = (struct ch592_hal_timer*)timer->bsp_timer;
+	// bsptimer = (struct ch592_hal_timer*)timer->bsp_timer;
 
 	OS_ENTER_CRITICAL(sr);
 

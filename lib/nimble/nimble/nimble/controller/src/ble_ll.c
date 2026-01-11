@@ -750,12 +750,13 @@ ble_ll_get_our_devaddr(uint8_t addr_type)
  *
  * @param arg
  */
+extern uint8_t timerExpired;
 void
 ble_ll_wfr_timer_exp(void *arg)
 {
     int rx_start;
     uint8_t lls;
-
+    timerExpired+=20;
     rx_start = ble_phy_rx_started();
     lls = g_ble_ll_data.ll_state;
 
