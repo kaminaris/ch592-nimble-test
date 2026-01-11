@@ -5,6 +5,8 @@
 #include "CH59x_uart.h"
 #include <utils/debug_utils.h>
 
+#include "nimble/porting/nimble/include/os/os_cputime.h"
+
 // Uart Serials(&R32_UART0_CTRL);
 volatile uint32_t loopCounter = 0;
 auto ledState                 = LOW;
@@ -135,8 +137,6 @@ int mini_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
 	*p = 0;
 	return p - buf;
 }
-
-
 
 void Serialprintf(const char* format, ...) {
 	va_list args;
@@ -362,25 +362,35 @@ void setup() {
 	Serialprintf("BLE MAC: %s\n", macstr);
 }
 
-extern "C"  {
-	extern volatile uint32_t hal_timer_chk_queue_hits;
-	extern volatile uint32_t hal_timer_chk_queue_execs;
-	extern volatile uint32_t hal_timer_queue_inserts;
-	extern volatile uint32_t halTimerLastExpiry;
-	extern volatile uint32_t halTimerCheckCnt;
-	extern volatile uint32_t txCallsCnt;
-	extern volatile uint32_t lleIrqCount;
-	extern volatile uint32_t halTimerCheckFail;
+extern "C" {
+extern volatile uint32_t hal_timer_chk_queue_hits;
+extern volatile uint32_t hal_timer_chk_queue_execs;
+extern volatile uint32_t hal_timer_queue_inserts;
+extern volatile uint32_t halTimerLastExpiry;
+extern volatile uint32_t halTimerCheckCnt;
+extern volatile uint32_t txCallsCnt;
+extern volatile uint32_t lleIrqCount;
+extern volatile uint32_t halTimerCheckFail;
+extern volatile uint32_t osTimerTest;
 }
+
 void loop() {
 	loopCounter++;
 	// Serials.println("Looping...");
 	ledState = (ledState == LOW) ? HIGH : LOW;
 	digitalWrite(PA8, ledState);
+	auto tcnt = os_cputime_get32();
+	// convert 32.xxxKhz to milliseconds
+	uint32_t ms = (tcnt * 1000) / 32768;
+	Serialprintf("TMR: %d, MS: %d\n", tcnt, ms);
+	// Serialprintf("TMR: %d\n", os_cputime_get32());
 	Serialprintf(
-		"TX: %d, IRQ: %d, Exec: %d, Ins: %d Exp: %d, Cnt: %d, Fail: %d\n",
+		"TX: %d, IRQ: %d\n",
 		txCallsCnt,
-		lleIrqCount,
+		lleIrqCount
+	);
+	Serialprintf(
+		"Exec: %d, Ins: %d Exp: %d, Cnt: %d, Fail: %d\n",
 		hal_timer_chk_queue_execs,
 		hal_timer_queue_inserts,
 		halTimerLastExpiry,
@@ -417,8 +427,8 @@ void abort(void) {
 	// Get stack pointer and frame pointer
 	uint32_t sp, fp, ra, pc;
 	__asm__ volatile("mv %0, sp" : "=r"(sp));
-	__asm__ volatile("mv %0, s0" : "=r"(fp));  // Frame pointer
-	__asm__ volatile("mv %0, ra" : "=r"(ra));  // Return address
+	__asm__ volatile("mv %0, s0" : "=r"(fp)); // Frame pointer
+	__asm__ volatile("mv %0, ra" : "=r"(ra)); // Return address
 	pc = (uint32_t)__builtin_return_address(0);
 
 	printf("SP: 0x%08lx\n", sp);
@@ -429,23 +439,23 @@ void abort(void) {
 	// Simple stack dump (16 words)
 	printf("\nStack dump:\n");
 	uint32_t* stack = (uint32_t*)sp;
-	for(int i = 0; i < 16; i++) {
+	for (int i = 0; i < 16; i++) {
 		printf("0x%08lx: 0x%08lx\n", (uint32_t)&stack[i], stack[i]);
 	}
 
 	// Backtrace attempt (walk frame pointers)
 	printf("\nBacktrace:\n");
 	uint32_t* frame = (uint32_t*)fp;
-	for(int depth = 0; depth < 10 && frame; depth++) {
-		if((uint32_t)frame < 0x20000000 || (uint32_t)frame > 0x20007000) {
-			break;  // Invalid frame pointer
+	for (int depth = 0; depth < 10 && frame; depth++) {
+		if ((uint32_t)frame < 0x20000000 || (uint32_t)frame > 0x20007000) {
+			break; // Invalid frame pointer
 		}
-		uint32_t ret_addr = frame[-1];  // Return address typically at fp-4
+		uint32_t ret_addr = frame[-1]; // Return address typically at fp-4
 		printf("#%d: 0x%08lx\n", depth, ret_addr);
-		frame = (uint32_t*)frame[-2];  // Previous frame pointer at fp-8
+		frame = (uint32_t*)frame[-2]; // Previous frame pointer at fp-8
 	}
 
-	while(1){};  // Halt
+	while (1) {
+	}; // Halt
 }
-
 }

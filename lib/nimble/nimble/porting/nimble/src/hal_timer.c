@@ -253,7 +253,10 @@ void TMR0_IRQHandler(void) {
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	ch592_hal_timer0.tmr_cntr++;
 	osTimerTest = ch592_hal_timer0.tmr_cntr;
-	if (ch592_hal_timer0.tmr_cmp && ch592_hal_timer0.tmr_cmp == ch592_hal_timer0.tmr_cntr) {
+	if (
+		ch592_hal_timer0.tmr_cmp > 0 &&
+		(int32_t)(ch592_hal_timer0.tmr_cntr - ch592_hal_timer0.tmr_cmp) >= 0
+	) {
 		ch592_timer0_irq_handler();
 	}
 	// TODO: not sure when to clear flag

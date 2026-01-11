@@ -1334,13 +1334,7 @@ ble_phy_isr(void)
     /* Read irq register to determine which interrupts are enabled */
     irq_en = LL->INT_EN;
     status = LL->STATUS;
-    {
-        LL->STATUS &= LL->INT_EN;
-        BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
-    }
-    DevSetMode(0);
-    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-    LL->LL0 |= 0x08;
+
 
     /* Clear NVIC pending */
     // NVIC->IPRR[0] = (1 << (LLE_IRQn & 0x1F));
@@ -1370,21 +1364,16 @@ ble_phy_isr(void)
         }
     }
 
-
-    /* Handle disabled event. This is enabled for both TX and RX. On RX, we
-     * need to check phy_rx_started flag to make sure we actually were receiving
-     * a PDU, otherwise this is due to wfr.
-     */
-    /* Check if DISABLED event occurred and is enabled */
-    if ((irq_en & 0x01) && (LL->STATUS & 0x01)) {  // Bit 0 for DISABLED event
+    // Check if we enabled TX done event
+    if (irq_en & LLIRQ_TX_DONE) {  // Bit 0 for DISABLED event
         // On CH592, we may not have separate END/DISABLED events
         // Need to verify the actual status bits available
 
         /* Clear the status flags */
-        LL->STATUS = 0x01;  // Clear DISABLED status bit
+        // LL->STATUS = 0x01;  // Clear DISABLED status bit
 
         /* Disable the DISABLED interrupt */
-        LL->INT_EN &= ~0x01;  // Clear bit 0
+        // LL->INT_EN &= ~0x01;  // Clear bit 0
 
         switch (g_ble_phy_data.phy_state) {
             case BLE_PHY_STATE_RX:
@@ -1410,7 +1399,16 @@ ble_phy_isr(void)
     os_trace_isr_exit();
 
 }
-
+static inline void finishISR() {
+    {
+        LL->STATUS &= LL->INT_EN;
+        BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
+    }
+    DevSetMode(0);
+    LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+    LL->LL0 |= 0x08;
+}
+volatile uint32_t txCallsCnt = 0;
 // CH592 interrupt handlers
 // __INTERRUPT
 __HIGH_CODE
@@ -1418,7 +1416,9 @@ void LLE_IRQHandler() {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     lleIrqCount++;
     ble_phy_isr();
-    PFIC->IPRR[0] = (1 << 8);
+
+    finishISR();
+    // PFIC->IPRR[0] = (1 << 8);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -1753,7 +1753,7 @@ ble_phy_rx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
 
     return rc;
 }
-volatile uint32_t txCallsCnt = 0;
+
 int
 ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 {
@@ -1855,19 +1855,19 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     // ohhhhhh its the isler line that makes it enabled
     //TODO: wtf?
     // LL->INT_EN = 0x1f000f;
-    // LL->INT_EN = LLIRQ_TX_DONE;
+    LL->INT_EN = LLIRQ_TX_DONE;
     LL->TMR = (uint32_t)(payload_len *512); // needs optimisation, per phy mode
 
     BB->CTRL_CFG |= CTRL_CFG_START_TX;
     BB->CTRL_TX &= 0xfffffffc;
 
     LL->LL0 = 2; // Not sure what this does, but on RX it's 1
-    while(LL->TMR);
-    DevSetMode(0);
-    if(LL->LL0 & 3) {
-        LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-        LL->LL0 |= 0x08;
-    }
+    // while(LL->TMR);
+    // DevSetMode(0);
+    // if(LL->LL0 & 3) {
+    //     LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+    //     LL->LL0 |= 0x08;
+    // }
     // LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
     /* Set the PHY transition */
     g_ble_phy_data.phy_transition = end_trans;
@@ -1889,7 +1889,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         rc = BLE_PHY_ERR_RADIO_STATE;
     }
 
-    ble_phy_isr();
+    // ble_phy_isr();
 
     return rc;
 }
