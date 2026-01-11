@@ -372,6 +372,10 @@ extern volatile uint32_t txCallsCnt;
 extern volatile uint32_t lleIrqCount;
 extern volatile uint32_t halTimerCheckFail;
 extern volatile uint32_t osTimerTest;
+extern volatile uint32_t testRxCount;
+extern volatile uint32_t txEndIsrCnt;
+extern volatile uint32_t irqStatusLog[10];
+extern volatile uint32_t irqEnLog[10];
 }
 
 void loop() {
@@ -385,10 +389,17 @@ void loop() {
 	Serialprintf("TMR: %d, MS: %d\n", tcnt, ms);
 	// Serialprintf("TMR: %d\n", os_cputime_get32());
 	Serialprintf(
-		"TX: %d, IRQ: %d\n",
+		"RX: %d, TX: %d, txisr: %d IRQ: %d\n",
+		testRxCount,
 		txCallsCnt,
+		txEndIsrCnt,
 		lleIrqCount
 	);
+	auto maxIrq = min(lleIrqCount, 10);
+	printf("IRQ Status Log:\n");
+	for (int i = 0; i < maxIrq; i++) {
+		printf("[%d] STATUS: %d  INT_EN:%d\n", i, irqStatusLog[i], irqEnLog[i]);
+	}
 	Serialprintf(
 		"Exec: %d, Ins: %d Exp: %d, Cnt: %d, Fail: %d\n",
 		hal_timer_chk_queue_execs,

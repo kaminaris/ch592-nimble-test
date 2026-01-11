@@ -680,47 +680,11 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
     /* Adjust for delay between actual access address RX and EVENT_ADDRESS */
     end_time += g_ble_phy_t_rxaddrdelay[phy];
 
-    /* CH592: Set TMR0 compare value for wait-for-response timeout */
-    // R32_TMR0_CNT_END = end_time;
-
-    /* CH592: Clear timer compare interrupt flag */
-    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-
-    /* Enable wait for response PPI */
-    // CH592: No hardware PPI - handle timeout in TMR0 interrupt
-    // TODO: Enable TMR0 interrupt to trigger radio disable on timeout
-    // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;  // Clear flag again before enabling
-    // R8_TMR0_INTER_EN |= RB_TMR_IE_CYC_END; // Enable compare interrupt
-
-
-    /*
-     * It may happen that if CPU is halted for a brief moment (e.g. during flash
-     * erase or write), TIMER0 already counted past CC[3] and thus wfr will not
-     * fire as expected. In case this happened, let's just disable PPIs for wfr
-     * and trigger wfr manually (i.e. disable radio).
-     *
-     * Note that the same applies to RX start time set in CC[0] but since it
-     * should fire earlier than wfr, fixing wfr is enough.
-     *
-     * CC[1] is only used as a reference on RX start, we do not need it here so
-     * it can be used to read TIMER0 counter.
-     */
-    /* CH592: Manually capture current timer value */
     uint32_t current_time = osTimerTest;
 
     /* Check if timer already passed the compare value (timeout already occurred) */
     if (current_time > osTimerTest) {
-        /* Timeout already happened - disable radio manually */
 
-        /* Disable TMR0 compare interrupt */
-        // R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
-
-        /* Clear interrupt flag */
-        // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-
-        /* Trigger radio disable */
-        // TODO: Add CH592 radio disable command here
-        // This depends on your radio implementation
         DevSetMode(0);
     }
 }
@@ -781,7 +745,7 @@ ble_phy_rx_xcvr_setup(void)
     }
 #else
     // TODO: maybe?
-    // LL->RXBUF = (uint32_t)dptr;
+    LL->RXBUF = (uint32_t)dptr;
 #endif
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
@@ -799,20 +763,6 @@ ble_phy_rx_xcvr_setup(void)
     }
 #endif
 
-    /* Turn off trigger TXEN on output compare match and AAR on bcmatch */
-    /* CH592: Disable timer-to-radio and radio-to-AAR triggers */
-    /* No hardware PPI on CH592 - these are NOPs or handled differently */
-
-    /* Disable TMR0 compare interrupt that would trigger radio TXEN */
-    //R8_TMR0_INTER_EN &= ~RB_TMR_IE_CYC_END;
-
-    /* Clear any pending timer interrupt */
-    //R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-
-    /* CH592: No AAR (Address Resolution) hardware equivalent */
-    /* If you implemented software AAR, disable its trigger here */
-
-    /* Reset the rx started flag. Used for the wait for response */
     g_ble_phy_data.phy_rx_started = 0;
     g_ble_phy_data.phy_state = BLE_PHY_STATE_RX;
 
@@ -831,41 +781,29 @@ ble_phy_rx_xcvr_setup(void)
     g_ble_phy_data.phy_bcc_offset = 0;
 #endif
 
-    /* I want to know when 1st byte received (after address) */
-    /* CH592: No bit counter compare (BCC) hardware */
-    /* The ISLER library doesn't expose bit-level events during reception */
+    DevSetMode(0);
+	if(LL->LL0 & 3) {
+		LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+		LL->LL0 |= 0x08;
+	}
+	LL->TMR = 0;
 
-    /* CH592: No event registers - reception is handled by ISLER internally */
-    /* These events don't exist on CH592:
-     * - EVENTS_ADDRESS: Access address match (hidden inside ISLER)
-     * - EVENTS_DEVMATCH: Device address match (no hardware support)
-     * - EVENTS_BCMATCH: Bit counter match (no hardware support)
-     * - EVENTS_RSSIEND: RSSI measurement complete (no separate event)
-     * - EVENTS_CRCOK: CRC validation (checked in ble_phy_isr after reception)
-     */
+	DevSetChannel(g_ble_phy_data.phy_chan);
+	DevSetMode(DEVSETMODE_RX);
 
-    /* CH592: No SHORTS hardware */
-    /* These automatic state transitions don't exist:
-     * - END → DISABLE: Must call DevSetMode(0) manually after Frame_RX completes
-     * - READY → START: Automatically handled by Frame_RX()
-     * - ADDRESS → BCSTART: N/A (no bit counter)
-     * - ADDRESS → RSSISTART: Call ReadRSSI() in your ISR callback
-     * - DISABLED → RSSISTOP: N/A (RSSI is read on-demand)
-     */
-    NVIC_EnableIRQ(RADIO_IRQn);
+	// BB->CTRL_CFG = (phy_mode == PHY_2M) ? CTRL_CFG_PHY_2M:
+	BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_2M: CTRL_CFG_PHY_1M;
+	BB->BB6 = (BB->BB6 & 0xfffffc00) | ((g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_2M) ? 0x13a : 0x132);
+	BB->BB4 = (BB->BB4 & 0x00ffffff) | ((g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_2M) ? 0x78000000 : 0x7f000000);
 
-    /* CH592: Enable radio interrupt via ISLER callback */
-    /* Your ble_phy_isr() is called when LLE_IRQHandler() fires */
-    /* This happens ONLY when a complete frame is received */
-    /* No separate ADDRESS or DISABLED events available */
+	BB->ACCESSADDRESS1 = g_ble_phy_data.phy_access_address; // access address
+	BB->CRCINIT1 = 0x555555; // crc init
 
-    /* Note: In ble_phy_isr(), you can now access:
-     * - Received frame data in LLE_BUF
-     * - RSSI via ReadRSSI()
-     * - LL->STATUS for error flags (but they're cleared on entry)
-     */
+	LL->LL0 = 1; // Not sure what this does, but on TX it's 2
+	//rx_ready = 0;
 }
 
+volatile uint32_t txEndIsrCnt = 0;
 /**
  * Called from interrupt context when the transmit ends
  *
@@ -924,15 +862,9 @@ ble_phy_tx_end_isr(void)
         ble_phy_mode_apply(g_ble_phy_data.phy_rx_phy_mode);
 #endif
 
+        txEndIsrCnt++;
         /* Packet pointer needs to be reset. */
         ble_phy_rx_xcvr_setup();
-
-        /* CH592: Set up timer for RX start after TIFS */
-        // Stop timer
-        // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;
-
-        // Clear counter
-        // R32_TMR0_COUNT = 0;
 
         // Calculate when to start RX (TX end + TIFS)
         rx_time = g_ble_phy_data.g_tx_end_time + tifs;
@@ -940,14 +872,6 @@ ble_phy_tx_end_isr(void)
         rx_time += 2; // Clock accuracy compensation
         rx_time += 1; // Extra compensation for timer cycle
 
-        // Set compare for RX enable
-        // R32_TMR0_CNT_END = rx_time;
-
-        // Clear interrupt flag
-        // R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
-
-        // Start timer
-        // R8_TMR0_CTRL_MOD |= RB_TMR_COUNT_EN;
 
         // TODO: You'll need to handle RX enable in TMR0 ISR when it fires
 
@@ -958,7 +882,10 @@ ble_phy_tx_end_isr(void)
          * FIXME failing to enable LNA may result in unexpected RSSI drop in
          *       case we still rxd something, so perhaps we could check it here
          */
+        ble_phy_wfr_enable(BLE_PHY_WFR_ENABLE_TXRX, 0, 0);
     } else if (transition == BLE_PHY_TRANSITION_TX_TX) {
+
+        txEndIsrCnt+=100;
         if (g_ble_phy_data.txtx_time_anchor) {
             /* Schedule next TX relative to current TX end. TX end timestamp is
              * captured in CC[2].
@@ -1015,18 +942,6 @@ ble_phy_tx_end_isr(void)
         /* CH592: Stop timer and disable radio operations */
         // R8_TMR0_CTRL_MOD &= ~RB_TMR_COUNT_EN;  // Stop TMR0
         // R32_TMR0_COUNT = 0;                     // Clear counter
-
-        /* Disable radio interrupts */
-        LL->INT_EN = 0;
-
-        /* Stop radio if active */
-        DevSetMode(0);
-
-        /* Clear any pending operations */
-        if (LL->LL0 & 3) {
-            LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-            LL->LL0 |= 0x08;
-        }
 
         assert(transition == BLE_PHY_TRANSITION_NONE);
     }
@@ -1323,7 +1238,6 @@ ble_phy_isr(void)
 {
     uint32_t status;
     uint32_t irq_en;
-    lleIrqCount++;
 
     os_trace_isr_enter();
     // Check if this is a TX ADDRESS event (access address transmitted)
@@ -1334,6 +1248,11 @@ ble_phy_isr(void)
     /* Read irq register to determine which interrupts are enabled */
     irq_en = LL->INT_EN;
     status = LL->STATUS;
+
+    if (status == 0x20000) {
+        // This is probably radio ready?
+        return;
+    }
 
 
     /* Clear NVIC pending */
@@ -1348,24 +1267,15 @@ ble_phy_isr(void)
     /* We get this if we have started to receive a frame */
     /* Check if ADDRESS event occurred (access address received) */
     // TODO: 0x02 is taken out of ass
-    if ((irq_en & 0x02) && (LL->STATUS & 0x02)) {  // Bit 1 for ADDRESS event
-        /*
-         * wfr timer is calculated to expire at the exact time we should start
-         * receiving a packet (with 1 usec precision) so it is possible it will
-         * fire at the same time as ADDRESS event. If this happens, radio will
-         * be disabled while we are waiting for first byte match after 1st byte
-         * of payload is received and ble_phy_rx_start_isr() will fail. In this
-         * case we should not clear DISABLED irq mask so it will be handled as
-         * regular radio disabled event below. In other case radio was disabled
-         * on purpose and there's nothing more to handle so we can clear mask.
-         */
-        if (ble_phy_rx_start_isr()) {
-            irq_en &= ~0x01;  // Clear DISABLED interrupt mask (bit 0)
-        }
-    }
+    // if ((irq_en & 0x02) && (LL->STATUS & 0x02)) {  // Bit 1 for ADDRESS event
+    //     if (ble_phy_rx_start_isr()) {
+    //         irq_en &= ~0x01;  // Clear DISABLED interrupt mask (bit 0)
+    //     }
+    // }
 
     // Check if we enabled TX done event
-    if (irq_en & LLIRQ_TX_DONE) {  // Bit 0 for DISABLED event
+    if (status & LL_STATUS_TX) {
+        lleIrqCount+=100;
         // On CH592, we may not have separate END/DISABLED events
         // Need to verify the actual status bits available
 
@@ -1387,7 +1297,9 @@ ble_phy_isr(void)
                 ble_phy_tx_end_isr();
                 break;
             default:
-                BLE_LL_ASSERT(0);
+                // Ignore initial interrupts
+                // BLE_LL_ASSERT(0);
+                break;
         }
     }
 
@@ -1409,13 +1321,26 @@ static inline void finishISR() {
     LL->LL0 |= 0x08;
 }
 volatile uint32_t txCallsCnt = 0;
+volatile uint32_t testRxCount = 0;
+#define irqLogSize 10
+volatile uint32_t irqStatusLog[irqLogSize] = {0};
+volatile uint32_t irqEnLog[irqLogSize] = {0};
+
 // CH592 interrupt handlers
 // __INTERRUPT
 __HIGH_CODE
 void LLE_IRQHandler() {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    lleIrqCount++;
-    ble_phy_isr();
+
+    if (LL->STATUS != 0 && LL->INT_EN != 0) {
+        if (lleIrqCount < irqLogSize) {
+            irqStatusLog[lleIrqCount] = LL->STATUS;
+            irqEnLog[lleIrqCount] = LL->INT_EN;
+        }
+
+        lleIrqCount++;
+        ble_phy_isr();
+    }
 
     finishISR();
     // PFIC->IPRR[0] = (1 << 8);
@@ -1539,6 +1464,7 @@ ble_phy_init(void)
 static int
 ble_phy_rx(void)
 {
+    testRxCount++;
     /*
      * Check radio state.
      *
@@ -1835,9 +1761,13 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     DevSetMode(DEVSETMODE_TX);
 
     BB->ACCESSADDRESS1 = g_ble_phy_data.phy_access_address; // access address
-    BB->CRCINIT1 = 0x555555;; // crc init
+    BB->CRCINIT1 = 0x555555; // crc init
 
     LL->TXBUF = (uint32_t)pktptr;
+    //TODO: wtf?
+    // 0001 1111 0000 0000 0000 0000 0000 1111
+    LL->INT_EN = 0x1f000f;
+    // LL->INT_EN = LLIRQ_TX_DONE;
     // for( int timeout = 3000; !(RF->RF26 & 0x1000000) && timeout >= 0; timeout-- );
     for (int timeout = 3000; timeout > 0 && !(RF->RF26 & 0x1000000); timeout--);
     // default 1M for now TODO: may not be needed?
@@ -1853,9 +1783,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 
     /* Enable the interrupt for radio operations complete */
     // ohhhhhh its the isler line that makes it enabled
-    //TODO: wtf?
-    // LL->INT_EN = 0x1f000f;
-    LL->INT_EN = LLIRQ_TX_DONE;
+
     LL->TMR = (uint32_t)(payload_len *512); // needs optimisation, per phy mode
 
     BB->CTRL_CFG |= CTRL_CFG_START_TX;

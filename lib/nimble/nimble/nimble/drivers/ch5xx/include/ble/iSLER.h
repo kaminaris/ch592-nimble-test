@@ -13,7 +13,6 @@ static inline void NVIC_EnableIRQ(IRQn_Type IRQn)
 #ifdef CH570_CH572
 #define CRCPOLY1           BB2
 #define ACCESSADDRESS1     BB3
-#define RSSI               BB12 // ? couldn't find it, not sure
 #define CTRL_TX            BB13
 #define CRCINIT2           BB22
 #define CRCPOLY2           BB23
@@ -322,22 +321,25 @@ void BB_IRQHandler() {
 #ifndef LL_EXTERNAL_IRQ_HANDLER
 __attribute__((interrupt))
 void LLE_IRQHandler() {
-	// printf("LL\n");
+	int rx_flag = 0;
 #ifdef CH571_CH573
 	if(LL->STATUS & (1<<9)) {
 		LL->TMR = 400;
 		BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 2;
 		BB->CTRL_CFG |= 0x10000000;
+		rx_flag = 1; // XXX TODO: Figure out which bit is the RX bit.
 	}
 	LL->STATUS = 0;
 #elif defined(CH582_CH583)
 	if((LL->STATUS & (1<<14)) && (LL->INT_EN & (1<<14))) {
 		LL->LL26 = 0xffffffff;
 		LL->STATUS = 0x4000;
+		rx_flag = 1; // XXX TODO: Figure out which bit is the RX bit.
 	}
 	else
 #endif
 	{
+		rx_flag = LL->STATUS & 1;
 		LL->STATUS &= LL->INT_EN;
 		BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 	}
@@ -353,7 +355,7 @@ void LLE_IRQHandler() {
 }
 #endif
 
-static inline void RFEND_Reset() {
+void RFEND_Reset() {
 #ifdef CH571_CH573
 	RF->RF3 |= 0x1000;
 	ADD_N_NOPS(20);
@@ -382,7 +384,7 @@ static inline void RFEND_Reset() {
 #endif
 }
 
-static inline void DevInit(uint8_t TxPower) {
+void DevInit(uint8_t TxPower) {
 #ifdef CH571_CH573
 	DMA->DMA4 = (uint32_t)LLE_BUF;
 	DMA->DMA5 = (uint32_t)LLE_BUF;
@@ -445,9 +447,7 @@ static inline void DevInit(uint8_t TxPower) {
 	LL->LL8 = 0xffffffff;
 	LL->LL11 = 0x6e;
 	LL->LL21 = 0x14;
-	//TODO: verify
 	LL->INT_EN = 0x1f000f;
-	// LL->INT_EN = 0;
 #endif
 #ifndef LL_EXTERNAL_BUFFER
 	LL->RXBUF = (uint32_t)LLE_BUF;
@@ -560,7 +560,7 @@ static inline void DevInit(uint8_t TxPower) {
 	NVIC->VTFIDR[3] = 0x14;
 }
 
-inline void DevSetMode(uint16_t mode) {
+void DevSetMode(uint16_t mode) {
 #if !defined(CH571_CH573)
 	if(mode) {
 		BB->CTRL_CFG = DEVSETMODE_ON;
@@ -579,7 +579,7 @@ inline void DevSetMode(uint16_t mode) {
 	LL->CTRL_MOD = mode;
 }
 
-static inline uint32_t RFEND_TXCTune(uint8_t channel) {
+uint32_t RFEND_TXCTune(uint8_t channel) {
 	// 0xbf = 2401 MHz
 	RF->RF1 &= 0xfffffffe;
 	RF->TXTUNE_CTRL = (RF->TXTUNE_CTRL & 0xfffe00ff) | (0xbf00 + (channel_map[channel] << 8));
@@ -600,7 +600,7 @@ static inline uint32_t RFEND_TXCTune(uint8_t channel) {
 	return (nGA << 24) | nCO;
 }
 
-static inline void RFEND_TXTune() {
+void RFEND_TXTune() {
 	RF->RF1 &= 0xfffffeff;
 	RF->RF10 &= 0xffffefff;
 	RF->RF11 &= 0xffffffef;
@@ -680,7 +680,7 @@ static inline void RFEND_TXTune() {
 	RF->RF1 |= 0x100;
 }
 
-static inline void RFEND_RXTune() {
+void RFEND_RXTune() {
 	RF->RF20 &= 0xfffeffff;
 	RF->RF2 |= 0x200000;
 	RF->RF3 = (RF->RF3 & 0xffffffef) | 0x10;
@@ -732,7 +732,13 @@ void DevSetChannel(uint8_t channel) {
 
 __HIGH_CODE
 int8_t ReadRSSI() {
+#ifdef CH570_CH572
+	uint8_t *tx_buf = (uint8_t*)LLE_BUF;
+	int len = tx_buf[1];
+	return (int8_t)tx_buf[len +4];
+#else
 	return (int8_t)(BB->RSSI >> 0xf);
+#endif
 }
 ///////////////////////////////////// ADDED CRCINIT PARAMETER /////////////////////////////////
 __HIGH_CODE
