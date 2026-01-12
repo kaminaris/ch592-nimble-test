@@ -1883,14 +1883,14 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         // printf("BB->BB15 %x\n", BB->BB15);
         // printf("BB->BB4 %x\n", BB->BB4);
     }
-    Frame_TX(
-        0x8E89BED6,
-        pktptr,
-        payload_len,
-        37,
-        PHY_1M,
-        0x555555
-    );
+    // Frame_TX(
+    //     0x8E89BED6,
+    //     pktptr,
+    //     payload_len,
+    //     37,
+    //     PHY_1M,
+    //     0x555555
+    // );
     // Frame_TX(
     //     0x8E89BED6,
     //     adv,
@@ -1907,7 +1907,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     //     PHY_1M,
     //     0x555555
     // );
-    /*
+
     BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
     DevSetChannel(g_ble_phy_data.phy_chan);
@@ -1919,8 +1919,8 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     BB->ACCESSADDRESS1 = g_ble_phy_data.phy_access_address; // access address
     BB->CRCINIT1 = 0x555555; // crc init
 
-    // LL->TXBUF = (uint32_t)pktptr;
-    LL->TXBUF = (uint32_t)adv;
+    LL->TXBUF = (uint32_t)pktptr;
+    // LL->TXBUF = (uint32_t)adv;
     //TODO: wtf?
     // 0001 1111 0000 0000 0000 0000 0000 1111
     // LL->INT_EN = 0x1f000f;
@@ -1949,7 +1949,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         LL->LL0 |= 0x08;
     }
 
-    */
+
     // LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
     /* Set the PHY transition */
     g_ble_phy_data.phy_transition = end_trans;
