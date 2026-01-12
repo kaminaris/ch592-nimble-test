@@ -1923,7 +1923,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     // LL->TXBUF = (uint32_t)adv;
     //TODO: wtf?
     // 0001 1111 0000 0000 0000 0000 0000 1111
-    // LL->INT_EN = 0x1f000f;
+    LL->INT_EN = 0x1f000f;
     // LL->INT_EN = LLIRQ_TX_DONE;
     // for( int timeout = 3000; !(RF->RF26 & 0x1000000) && timeout >= 0; timeout-- );
     for (int timeout = 3000; timeout > 0 && !(RF->RF26 & 0x1000000); timeout--);
@@ -1942,12 +1942,12 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     BB->CTRL_TX &= 0xfffffffc;
 
     LL->LL0 = 2; // Not sure what this does, but on RX it's 1
-    while(LL->TMR);
-    DevSetMode(0);
-    if(LL->LL0 & 3) {
-        LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-        LL->LL0 |= 0x08;
-    }
+    // while(LL->TMR);
+    // DevSetMode(0);
+    // if(LL->LL0 & 3) {
+    //     LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+    //     LL->LL0 |= 0x08;
+    // }
 
 
     // LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
