@@ -1885,28 +1885,28 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     }
     Frame_TX(
         0x8E89BED6,
-        adv,
-        sizeof(adv)-2,
+        pktptr,
+        payload_len,
         37,
         PHY_1M,
         0x555555
     );
-    Frame_TX(
-        0x8E89BED6,
-        adv,
-        sizeof(adv)-2,
-        38,
-        PHY_1M,
-        0x555555
-    );
-    Frame_TX(
-        0x8E89BED6,
-        adv,
-        sizeof(adv)-2,
-        39,
-        PHY_1M,
-        0x555555
-    );
+    // Frame_TX(
+    //     0x8E89BED6,
+    //     adv,
+    //     sizeof(adv)-2,
+    //     38,
+    //     PHY_1M,
+    //     0x555555
+    // );
+    // Frame_TX(
+    //     0x8E89BED6,
+    //     adv,
+    //     sizeof(adv)-2,
+    //     39,
+    //     PHY_1M,
+    //     0x555555
+    // );
     /*
     BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
