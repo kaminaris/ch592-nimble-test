@@ -379,6 +379,7 @@ extern volatile uint32_t schedCntr;
 extern volatile uint32_t irqStatusLog[10];
 extern volatile uint32_t irqEnLog[10];
 extern volatile uint32_t timerExpired;
+extern volatile uint32_t coreInitialized;
 }
 
 void loop() {
@@ -392,7 +393,8 @@ void loop() {
 	Serialprintf("TMR: %d, MS: %d\n", tcnt, ms);
 	// Serialprintf("TMR: %d\n", os_cputime_get32());
 	Serialprintf(
-		"RX: %d, TX: %d, txisr: %d timex: %d, IRQ: %d\n",
+		"init: %d, RX: %d, TX: %d, txisr: %d timex: %d, IRQ: %d\n",
+		coreInitialized,
 		testRxCount,
 		txCallsCnt,
 		txEndIsrCnt,

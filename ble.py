@@ -1,20 +1,19 @@
-from scapy.all import *
-from scapy.layers.bluetooth import *
+from bleak import BleakScanner
+import asyncio
 
-def packet_handler(pkt):
-	if BTLE in pkt:
-		# Access Link Layer header
-		if BTLE_ADV in pkt:
-			adv = pkt[BTLE_ADV]
-			print(f"Advertiser Address: {adv.AdvA}")
+async def detect_ble_advertisements():
+	def callback(device, advertising_data):
+		# Raw advertisement data
+		print(f"Device: {device.address}")
+		print(f"RSSI: {advertising_data.rssi}")
+		print(f"Local name: {advertising_data.local_name}")
+		print(f"Manufacturer data: {advertising_data.manufacturer_data}")
+		print(f"Service data: {advertising_data.service_data}")
+		print("---")
 
-			# Raw bytes
-			raw_data = bytes(pkt)
-			print(f"Raw frame: {raw_data.hex()}")
+	scanner = BleakScanner(callback)
+	await scanner.start()
+	await asyncio.sleep(5.0)
+	await scanner.stop()
 
-			# Parse specific fields
-			if hasattr(pkt, 'data'):
-				print(f"Payload: {pkt.data}")
-
-# Sniff on Bluetooth interface (requires proper setup)
-sniff(iface="hci0", prn=packet_handler, store=0)
+asyncio.run(detect_ble_advertisements())

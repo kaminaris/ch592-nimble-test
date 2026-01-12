@@ -1385,7 +1385,7 @@ ble_phy_ccm_isr(void)
     }
 }
 #endif
-
+volatile uint32_t coreInitialized = 0;
 /**
  * ble phy init
  *
@@ -1415,7 +1415,7 @@ ble_phy_init(void)
     // nrf_radio_power_set(NRF_RADIO, true);
     RFCoreInit(LL_TX_POWER_0_DBM);
     printf("Core initialized\n");
-
+    coreInitialized++;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     nrf_ccm_int_disable(NRF_CCM, 0xffffffff);
     NRF_CCM->SHORTS = CCM_SHORTS_ENDKSGEN_CRYPT_Msk;
@@ -1709,6 +1709,7 @@ __attribute__((aligned(4))) uint8_t adv[] = {
     0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // MAC (reversed)
     0x06, 0x09, 'R', 'X', ':', '?', '?'};
 uint8_t oncex = 0;
+uint8_t oncey = 0;
 int
 ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 {
@@ -1760,11 +1761,11 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     payload_len = pducb(&dptr[3], pducb_arg, &hdr_byte);
 
     /* RAM representation has S0, LENGTH and S1 fields. (3 bytes) */
-    dptr[0] = 0x02;
-    // dptr[0] = hdr_byte;
+    // dptr[0] = 0x02;
+    dptr[0] = hdr_byte;
     dptr[1] = payload_len;
     dptr[2] = 0;
-    // memmove(&dptr[2], &dptr[3], payload_len);
+    memmove(&dptr[2], &dptr[3], payload_len);
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     /* Start key-stream generation and encryption (via short) */
     if (g_ble_phy_data.phy_encrypted) {
@@ -1781,6 +1782,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     }
 #endif
     // TODO: need to replicate
+    size_t reg_cnt = sizeof(LL_Type) / sizeof(uint32_t);
     if (oncex == 0) {
         oncex = 1;
         printf("Sending %d bytes to ch %d\n", sizeof(adv), g_ble_phy_data.phy_chan);
@@ -1788,8 +1790,99 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         for (int i = 0; i < sizeof(adv); i++) {
             printf("%d ", adv[i]);
         }
+        printf("\n");
+        // printf entire LL register
+        printf("LL registers:\n");
+        printf("LL->STATUS %x\n", LL->STATUS);
+        printf("NVIC->VTFIDR[3] %x\n", NVIC->VTFIDR[3]);
+        // printf("BB->CTRL_CFG %x\n", BB->CTRL_CFG);
+        // printf("BB->BB14 %x\n", BB->BB14);
+        // printf("BB->BB13 %x\n", BB->BB13);
+        // printf("BB->CTRL_TX %x\n", BB->CTRL_TX);
+        // printf("RF->RF23 %x\n", RF->RF23);
+        // printf("BB->BB15 %x\n", BB->BB15);
+        // printf("BB->BB4 %x\n", BB->BB4);
     }
     // Frame_TX(accessAddress, pktptr, payload_len, channelSet, PHY_1M, crcInit);
+    // RFCoreInit(LL_TX_POWER_0_DBM);
+
+    // DevInit(LL_TX_POWER_0_DBM);
+
+    uint8_t TxPower = LL_TX_POWER_0_DBM;
+
+
+
+	// LL->LL5 = 0x8c;
+	// LL->LL7 = 0x76;
+	// LL->LL9 = 0x8c;
+	// LL->LL13 = 0x8c;
+	// LL->LL17 = 0x8c;
+	// LL->LL19 = 0x76;
+	//
+	// LL->LL6 = 0x78;
+	// LL->LL8 = 0xffffffff;
+	// LL->LL11 = 0x6e;
+	// LL->LL21 = 0x14;
+	// LL->INT_EN = 0x1f000f;
+
+
+	// LL->RXBUF = LL_EXTERNAL_BUFFER;
+	//
+	//
+	// LL->STATUS = 0xffffffff;
+	// RF->RF10 = 0x480;
+	//
+	//
+	// RF->RF12 = (RF->RF12 & 0x8fffffff) | 0x10077700;
+	// RF->RF15 = (RF->RF15 & 0x18ff0fff) | 0x42005000;
+	// RF->RF19 &= 0xfffcff88;
+	// RF->RF21 = (RF->RF21 & 0xfffffff0) | 9;
+	// RF->RF23 &= 0xff88ffff;
+
+	// BB->CTRL_CFG |= 0x800000;
+	// BB->BB14 = 0x3ff; // ch584/5
+	// BB->BB13 = 0x50;
+	BB->CTRL_TX = (BB->CTRL_TX & 0x81ffffff) | (TxPower & 0x3f) << 0x19;
+	// uint32_t uVar3 = 0x1000000;
+	// uint32_t uVar4 = RF->RF23 & 0xf8ffffff;
+	// if(TxPower < 29) { // ch585: 27
+	// 	/* uVar3 and uVar4 are initialized properly already */
+	// }
+	// else if(TxPower < 35) {
+	// 	uVar3 = 0x3000000;
+	// }
+	// else if(TxPower < 59) {
+	// 	uVar3 = 0x5000000;
+	// }
+	// else {
+	// 	uVar4 = RF->RF23;
+	// 	uVar3 = 0x7000000;
+	// }
+	// RF->RF23 = uVar4 | uVar3;
+	// BB->BB15 = 0x2020c; // ch584/5
+	// BB->BB4 = (BB->BB4 & 0xffffffc0) | 0xe;
+	//
+	//
+	// NVIC->VTFIDR[3] = 0x14;
+
+
+
+
+
+    if (oncey == 0) {
+        oncey = 1;
+        printf("After DevInit\n");
+        printf("LL->STATUS %x\n", LL->STATUS);
+        printf("NVIC->VTFIDR[3] %x\n", NVIC->VTFIDR[3]);
+        // Print registers again
+        // printf("BB->CTRL_CFG %x\n", BB->CTRL_CFG);
+        // printf("BB->BB14 %x\n", BB->BB14);
+        // printf("BB->BB13 %x\n", BB->BB13);
+        // printf("BB->CTRL_TX %x\n", BB->CTRL_TX);
+        // printf("RF->RF23 %x\n", RF->RF23);
+        // printf("BB->BB15 %x\n", BB->BB15);
+        // printf("BB->BB4 %x\n", BB->BB4);
+    }
     Frame_TX(
         0x8E89BED6,
         adv,
