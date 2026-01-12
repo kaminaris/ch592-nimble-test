@@ -378,7 +378,7 @@ extern volatile uint32_t timerExpiredAt;
 extern volatile uint32_t schedCntr;
 extern volatile uint32_t irqStatusLog[10];
 extern volatile uint32_t irqEnLog[10];
-extern volatile uint8_t timerExpired;
+extern volatile uint32_t timerExpired;
 }
 
 void loop() {

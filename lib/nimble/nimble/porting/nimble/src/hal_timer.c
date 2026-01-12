@@ -25,10 +25,10 @@
 #include "nimble/porting/nimble/include/hal/hal_timer.h"
 #include "nimble/porting/nimble/include/os/os_trace_api.h"
 
-void TMR0_TimerInit(uint32_t t) {
-	R32_TMR0_CNT_END = t;
-	R8_TMR0_CTRL_MOD = RB_TMR_ALL_CLEAR;
-	R8_TMR0_CTRL_MOD = RB_TMR_COUNT_EN;
+void TMR1_TimerInit(uint32_t t) {
+	R32_TMR1_CNT_END = t;
+	R8_TMR1_CTRL_MOD = RB_TMR_ALL_CLEAR;
+	R8_TMR1_CTRL_MOD = RB_TMR_COUNT_EN;
 }
 
 static inline void NVIC_DisableIRQ(IRQn_Type IRQn) {
@@ -46,9 +46,9 @@ static inline void NVIC_SetPriority(IRQn_Type IRQn, uint8_t priority) {
 /* IRQ prototype */
 typedef void (* hal_timer_irq_handler_t)(void);
 
-#define	TMR0_ITCfg(s,f)				((s)?(R8_TMR0_INTER_EN|=f):(R8_TMR0_INTER_EN&=~f))		/* TMR0 corresponding interrupt bit on and off */
+#define	TMR1_ITCfg(s,f)				((s)?(R8_TMR1_INTER_EN|=f):(R8_TMR1_INTER_EN&=~f))		/* TMR1 corresponding interrupt bit on and off */
 
-#define  TMR0_GetCurrentCount()		R32_TMR0_COUNT
+#define  TMR1_GetCurrentCount()		R32_TMR1_COUNT
 #define CH592_HAL_TIMER_MAX     1
 
 struct ch592_hal_timer {
@@ -176,7 +176,7 @@ void ch592_timer0_irq_handler(void) {
 volatile uint32_t osTimerTest = 0;
 
 __HIGH_CODE
-void TMR0_IRQHandler(void) {
+void TMR1_IRQHandler(void) {
 	// TODO: Not sure if this is needed
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	ch592_hal_timer0.tmr_cntr++;
@@ -188,7 +188,7 @@ void TMR0_IRQHandler(void) {
 		ch592_timer0_irq_handler();
 	}
 	// TODO: not sure when to clear flag
-	R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;
+	R8_TMR1_INT_FLAG = RB_TMR_IF_CYC_END;
 	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -216,7 +216,7 @@ int hal_timer_init(int timer_num, void* cfg) {
 	switch (timer_num) {
 #if MYNEWT_VAL(TIMER_0)
 		case 0:
-			irq_num = TMR0_IRQn;
+			irq_num = TMR1_IRQn;
 			break;
 #endif
 #if MYNEWT_VAL(TIMER_1)
@@ -264,7 +264,7 @@ int hal_timer_init(int timer_num, void* cfg) {
 #ifdef MYNEWT
 	NVIC_SetVector(irq_num, (uint32_t)irq_isr);
 #else
-	// NVIC_EnableIRQ(TMR0_IRQn);
+	// NVIC_EnableIRQ(TMR1_IRQn);
 #endif
 
 	return 0;
@@ -318,12 +318,12 @@ int hal_timer_config(int timer_num, uint32_t freq_hz) {
 
 	uint32_t sys_clk = GetSysClock2(); // Get system clock frequency
 	uint32_t cnt_end = sys_clk / freq_hz; // Calculate counter end value
-	TMR0_TimerInit(cnt_end);
-	TMR0_ITCfg(1, RB_TMR_IE_CYC_END); // Enable cycle end interrupt
-	PFIC_EnableIRQ(TMR0_IRQn); // Enable in NVIC
+	TMR1_TimerInit(cnt_end);
+	TMR1_ITCfg(1, RB_TMR_IE_CYC_END); // Enable cycle end interrupt
+	PFIC_EnableIRQ(TMR1_IRQn); // Enable in NVIC
 	// This may not be good idea? or ISR handling is bad?
-	//NVIC_EnableIRQ(TMR0_IRQn);
-	// bsptimer->tmr_cntr = TMR0_GetCurrentCount() & CH592_TIMER_MASK;
+	//NVIC_EnableIRQ(TMR1_IRQn);
+	// bsptimer->tmr_cntr = TMR1_GetCurrentCount() & CH592_TIMER_MASK;
 	OS_EXIT_CRITICAL(sr);
 
 	return 0;
@@ -352,10 +352,10 @@ int hal_timer_deinit(int timer_num) {
 
 	/* Disable NVIC for this timer */
 	NVIC_DisableIRQ(bsptimer->tmr_irq_num);
-	if (bsptimer->tmr_irq_num == TMR0_IRQn) {
-		TMR0_ITCfg(0, RB_TMR_IE_CYC_END);    /* disable compare/cycle-end interrupt */
-		R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;/* clear pending flag */
-		R8_TMR0_CTRL_MOD = RB_TMR_ALL_CLEAR; /* stop and clear timer */
+	if (bsptimer->tmr_irq_num == TMR1_IRQn) {
+		TMR1_ITCfg(0, RB_TMR_IE_CYC_END);    /* disable compare/cycle-end interrupt */
+		R8_TMR1_INT_FLAG = RB_TMR_IF_CYC_END;/* clear pending flag */
+		R8_TMR1_CTRL_MOD = RB_TMR_ALL_CLEAR; /* stop and clear timer */
 	}
 
 	bsptimer->tmr_enabled = 0;

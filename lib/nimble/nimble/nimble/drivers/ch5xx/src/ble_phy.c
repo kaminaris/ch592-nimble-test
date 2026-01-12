@@ -60,7 +60,7 @@ static void ble_phy_isr(void);
 
 // TODO: untested
 #define LLIRQ_RX_DONE            (1<<8)
-#define LLIRQ_TX_DONE            (1<<9)
+#define LLIRQ_TX_DONE            (1<<17)
 
 /*
  * XXX: Maximum possible transmit time is 1 msec for a 60ppm crystal
@@ -631,7 +631,7 @@ ble_phy_set_start_now(void)
  * @param tx_phy_mode phy mode for last TX (only valid for TX->RX)
  * @param wfr_usecs Amount of usecs to wait.
  */
-volatile uint8_t timerExpired = 0;
+volatile uint32_t timerExpired = 0;
 volatile uint32_t timerExpiredAt = 0;
 void
 ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
@@ -688,7 +688,7 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
         timerExpired++;
         ble_ll_wfr_timer_exp(NULL);
     } else {
-        timerExpired+=10;
+        timerExpired+=100;
         timerExpiredAt = end_time;
         /* Set the timeout */
         struct hal_timer tmr = {
@@ -804,7 +804,7 @@ ble_phy_rx_xcvr_setup(void)
 	DevSetMode(DEVSETMODE_RX);
 
 	// BB->CTRL_CFG = (phy_mode == PHY_2M) ? CTRL_CFG_PHY_2M:
-	BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_2M: CTRL_CFG_PHY_1M;
+	BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_1M : CTRL_CFG_PHY_2M;
 	BB->BB6 = (BB->BB6 & 0xfffffc00) | ((g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_2M) ? 0x13a : 0x132);
 	BB->BB4 = (BB->BB4 & 0x00ffffff) | ((g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_2M) ? 0x78000000 : 0x7f000000);
 
@@ -1286,8 +1286,7 @@ ble_phy_isr(void)
     // }
 
     // Check if we enabled TX done event
-    if (status & LL_STATUS_TX) {
-        lleIrqCount+=100;
+    if (status & LLIRQ_TX_DONE) {
         // On CH592, we may not have separate END/DISABLED events
         // Need to verify the actual status bits available
 
@@ -1345,12 +1344,26 @@ void LLE_IRQHandler() {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     if (LL->STATUS != 0 && LL->INT_EN != 0) {
-        if (lleIrqCount < irqLogSize) {
+        // [1] 0x00020000:  0000 0000 0000 0010 0000 0000 0000 0000  (bit 17) - probably ready
+        // [2] 0x00800002:  0000 0000 1000 0000 0000 0000 0000 0010  (bits 23, 1)
+        // [3] 0x01820000:  0000 0001 1000 0010 0000 0000 0000 0000  (bits 24, 23, 17)
+        // [3] 0x01820400:  0000 0001 1000 0010 0000 0100 0000 0000  (bits 24, 23, 17, 10)
+        //
+        // INT_EN 0x1F000F: 0000 0000 0001 1111 0000 0000 0000 1111  (bits 0-3, 16-20)
+
+        // 17 is probably TX finished?
+        if (
+            lleIrqCount < irqLogSize &&
+            LL->STATUS != 0 &&
+            LL->STATUS != 0x20000 &&
+            LL->STATUS != 0x800002 &&
+            LL->STATUS != 0x1820000
+        ) {
             irqStatusLog[lleIrqCount] = LL->STATUS;
             irqEnLog[lleIrqCount] = LL->INT_EN;
+            lleIrqCount++;
         }
 
-        lleIrqCount++;
         ble_phy_isr();
     }
 
@@ -1401,6 +1414,7 @@ ble_phy_init(void)
     // nrf_radio_power_set(NRF_RADIO, false);
     // nrf_radio_power_set(NRF_RADIO, true);
     RFCoreInit(LL_TX_POWER_0_DBM);
+    printf("Core initialized\n");
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     nrf_ccm_int_disable(NRF_CCM, 0xffffffff);
@@ -1476,7 +1490,6 @@ ble_phy_init(void)
 static int
 ble_phy_rx(void)
 {
-    testRxCount++;
     /*
      * Check radio state.
      *
@@ -1691,7 +1704,11 @@ ble_phy_rx_set_start_time(uint32_t cputime, uint8_t rem_usecs)
 
     return rc;
 }
-
+__attribute__((aligned(4))) uint8_t adv[] = {
+    0x02, 0x0d, // header for LL: PDU + frame length
+    0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // MAC (reversed)
+    0x06, 0x09, 'R', 'X', ':', '?', '?'};
+uint8_t oncex = 0;
 int
 ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 {
@@ -1743,10 +1760,11 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     payload_len = pducb(&dptr[3], pducb_arg, &hdr_byte);
 
     /* RAM representation has S0, LENGTH and S1 fields. (3 bytes) */
-    dptr[0] = hdr_byte;
+    dptr[0] = 0x02;
+    // dptr[0] = hdr_byte;
     dptr[1] = payload_len;
     dptr[2] = 0;
-
+    // memmove(&dptr[2], &dptr[3], payload_len);
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     /* Start key-stream generation and encryption (via short) */
     if (g_ble_phy_data.phy_encrypted) {
@@ -1763,7 +1781,40 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     }
 #endif
     // TODO: need to replicate
+    if (oncex == 0) {
+        oncex = 1;
+        printf("Sending %d bytes to ch %d\n", sizeof(adv), g_ble_phy_data.phy_chan);
+        printf("addr %u, phy: %d\n", g_ble_phy_data.phy_access_address, g_ble_phy_data.phy_tx_phy_mode);
+        for (int i = 0; i < sizeof(adv); i++) {
+            printf("%d ", adv[i]);
+        }
+    }
     // Frame_TX(accessAddress, pktptr, payload_len, channelSet, PHY_1M, crcInit);
+    Frame_TX(
+        0x8E89BED6,
+        adv,
+        sizeof(adv)-2,
+        37,
+        PHY_1M,
+        0x555555
+    );
+    Frame_TX(
+        0x8E89BED6,
+        adv,
+        sizeof(adv)-2,
+        38,
+        PHY_1M,
+        0x555555
+    );
+    Frame_TX(
+        0x8E89BED6,
+        adv,
+        sizeof(adv)-2,
+        39,
+        PHY_1M,
+        0x555555
+    );
+    /*
     BB->CTRL_TX = (BB->CTRL_TX & 0xfffffffc) | 1;
 
     DevSetChannel(g_ble_phy_data.phy_chan);
@@ -1775,25 +1826,21 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     BB->ACCESSADDRESS1 = g_ble_phy_data.phy_access_address; // access address
     BB->CRCINIT1 = 0x555555; // crc init
 
-    LL->TXBUF = (uint32_t)pktptr;
+    // LL->TXBUF = (uint32_t)pktptr;
+    LL->TXBUF = (uint32_t)adv;
     //TODO: wtf?
     // 0001 1111 0000 0000 0000 0000 0000 1111
-    LL->INT_EN = 0x1f000f;
+    // LL->INT_EN = 0x1f000f;
     // LL->INT_EN = LLIRQ_TX_DONE;
     // for( int timeout = 3000; !(RF->RF26 & 0x1000000) && timeout >= 0; timeout-- );
     for (int timeout = 3000; timeout > 0 && !(RF->RF26 & 0x1000000); timeout--);
     // default 1M for now TODO: may not be needed?
-    BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_2M: CTRL_CFG_PHY_1M;
+    BB->CTRL_CFG = (g_ble_phy_data.phy_tx_phy_mode == BLE_PHY_MODE_1M) ? CTRL_CFG_PHY_1M : CTRL_CFG_PHY_2M;
     LL->LL4 &= 0xfffdffff;
 
-    /* Clear all pending status flags (write-1-to-clear) */
+    // Clear all pending status flags (write-1-to-clear)
     LL->STATUS = LL_STATUS_TX;
 
-    /* CH592 doesn't have hardware shortcuts like nRF52 */
-    /* The radio state transitions are handled automatically by the hardware */
-    /* READY->START and END->DISABLE happen implicitly */
-
-    /* Enable the interrupt for radio operations complete */
     // ohhhhhh its the isler line that makes it enabled
 
     LL->TMR = (uint32_t)(payload_len *512); // needs optimisation, per phy mode
@@ -1802,12 +1849,14 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     BB->CTRL_TX &= 0xfffffffc;
 
     LL->LL0 = 2; // Not sure what this does, but on RX it's 1
-    // while(LL->TMR);
-    // DevSetMode(0);
-    // if(LL->LL0 & 3) {
-    //     LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
-    //     LL->LL0 |= 0x08;
-    // }
+    while(LL->TMR);
+    DevSetMode(0);
+    if(LL->LL0 & 3) {
+        LL->CTRL_MOD &= CTRL_MOD_RFSTOP;
+        LL->LL0 |= 0x08;
+    }
+
+    */
     // LL->INT_EN = (1 << 0);  // Enable bit 0 - basic radio completion interrupt
     /* Set the PHY transition */
     g_ble_phy_data.phy_transition = end_trans;
